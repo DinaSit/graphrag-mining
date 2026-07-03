@@ -270,6 +270,20 @@ class PostgresSink:
             "ALTER TABLE documents ADD COLUMN IF NOT EXISTS storage_bucket VARCHAR(256)",
             "ALTER TABLE documents ADD COLUMN IF NOT EXISTS storage_object VARCHAR(1024)",
             "ALTER TABLE documents ADD COLUMN IF NOT EXISTS storage_uri VARCHAR(1400)",
+            # Совместимость с базами, созданными до перехода на remote-эмбеддинги
+            # (256 изм.): старые векторы deterministic-hash (64) вычищаются,
+            # колонка расширяется. На vector(256) блок ничего не делает.
+            """
+            DO $$
+            BEGIN
+                IF (SELECT format_type(atttypid, atttypmod) FROM pg_attribute
+                    WHERE attrelid = 'fragment_vectors'::regclass
+                      AND attname = 'embedding') <> 'vector(256)' THEN
+                    TRUNCATE fragment_vectors;
+                    ALTER TABLE fragment_vectors ALTER COLUMN embedding TYPE vector(256);
+                END IF;
+            END $$;
+            """,
         ]
         for statement in statements:
             self._execute(statement, ())

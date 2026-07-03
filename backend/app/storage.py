@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -11,7 +12,12 @@ from app.file_storage import MinioFileStorage
 from app.persistence import Neo4jSink, PostgresSink
 from app.pipeline.normalization import DomainNormalizer
 from app.pipeline.parsers import choose_parser
-from app.pipeline.providers import DeterministicEmbeddingProvider, MockLLMProvider, RemoteExtractionProvider
+from app.pipeline.providers import (
+    DeterministicEmbeddingProvider,
+    MockLLMProvider,
+    RemoteEmbeddingProvider,
+    RemoteExtractionProvider,
+)
 from app.pipeline.validation import validate_candidate_numbers
 from app.schemas import (
     CandidateStatus,
@@ -49,7 +55,10 @@ class ApplicationStore:
         self.domain_dir = domain_dir
         self.normalizer = DomainNormalizer(domain_dir)
         self.llm = RemoteExtractionProvider(extraction_service_url) if extraction_service_url else MockLLMProvider()
-        self.embedder = DeterministicEmbeddingProvider()
+        # Провайдер эмбеддингов выбирается окружением: EMBEDDINGS_URL задан —
+        # внешний сервис (Yandex v2, 256), не задан — детерминированный baseline (64)
+        embeddings_url = os.environ.get("EMBEDDINGS_URL")
+        self.embedder = RemoteEmbeddingProvider(embeddings_url) if embeddings_url else DeterministicEmbeddingProvider()
         self.postgres_sink = postgres_sink
         self.graph_sink = graph_sink
         self.file_storage = file_storage
@@ -186,7 +195,9 @@ class ApplicationStore:
             self.postgres_sink.upsert_vectors(new_vectors, self.embedder.name)
 
     def search(self, query: str, top_k: int = 8) -> list[SearchHit]:
-        query_vector = self.embedder.embed([query])[0]
+        # Для запросов используется query-режим модели, если провайдер его поддерживает
+        embed_query = getattr(self.embedder, "embed_query", self.embedder.embed)
+        query_vector = embed_query([query])[0]
         hits: list[SearchHit] = []
         query_terms = set(query.lower().replace("ё", "е").split())
         for fragment_id, vector in self.fragment_vectors.items():

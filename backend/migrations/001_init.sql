@@ -80,7 +80,7 @@ CREATE TABLE IF NOT EXISTS facts (
 CREATE TABLE IF NOT EXISTS fragment_vectors (
     fragment_id VARCHAR(96) PRIMARY KEY REFERENCES source_fragments(id),
     embedding_model VARCHAR(128) NOT NULL,
-    embedding vector(64),
+    embedding vector(256),
     vector_metadata JSONB NOT NULL DEFAULT '{}'::jsonb
 );
 

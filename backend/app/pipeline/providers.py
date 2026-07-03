@@ -180,6 +180,39 @@ def _float_or_none(value: Any) -> float | None:
         return None
 
 
+class RemoteEmbeddingProvider:
+    """HTTP-адаптер к внешнему сервису эмбеддингов (POST {url} → {"embeddings": [...]}).
+
+    Fallback на детерминированный провайдер отсутствует намеренно: сбой индексации
+    должен быть видимым, смешение векторов разных моделей делает поиск некорректным.
+    """
+
+    name = "remote-embeddings"
+
+    def __init__(self, embed_url: str):
+        self.embed_url = embed_url
+        self.dimensions = int(os.environ.get("EMBEDDING_DIM", "256"))
+        self.timeout = float(os.environ.get("EMBEDDING_TIMEOUT", "120"))
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        return self._call(texts, kind="doc")
+
+    def embed_query(self, texts: list[str]) -> list[list[float]]:
+        # У модели раздельные режимы для документов и поисковых запросов
+        return self._call(texts, kind="query")
+
+    def _call(self, texts: list[str], kind: str) -> list[list[float]]:
+        request = urllib.request.Request(
+            self.embed_url,
+            data=json.dumps({"texts": texts, "kind": kind}, ensure_ascii=False).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        return data["embeddings"]
+
+
 class RemoteExtractionProvider:
     name = "remote-extraction"
 
