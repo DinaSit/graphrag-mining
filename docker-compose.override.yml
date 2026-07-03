@@ -1,0 +1,54 @@
+# Override ML-A: подключает сервис извлечения на Yandex AI Studio вместо ml-mock.
+# Docker Compose применяет файл автоматически; базовый docker-compose.yml не изменяется.
+# Требуется .env в корне репозитория с YANDEX_API_KEY (см. ml_extraction/README.md).
+# Возврат на mock: удалить или переименовать этот файл.
+
+services:
+  # Хост-порт PostgreSQL вынесен на 15432 из-за конфликта с локальным сервисом
+  # на 5432. Внутри сети compose адрес postgres:5432 не меняется.
+  postgres:
+    ports: !override
+      - "15432:5432"
+
+  ml-extraction:
+    restart: unless-stopped
+    build:
+      context: ml_extraction
+    environment:
+      YANDEX_API_KEY: ${YANDEX_API_KEY:?добавьте YANDEX_API_KEY в .env в корне репозитория}
+      YANDEX_FOLDER_ID: ${YANDEX_FOLDER_ID:-b1ggusvist6c2sia1dno}
+      YANDEX_MODEL: ${YANDEX_MODEL:-qwen3.6-35b-a3b/latest}
+      DOMAIN_DIR: /domain/default
+    volumes:
+      - ./domain:/domain:ro
+    ports:
+      - "8002:8002"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/health', timeout=2).read()"
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  backend:
+    environment:
+      EXTRACTION_SERVICE_URL: http://ml-extraction:8002/extract
+      # Реальное извлечение обрабатывает батч дольше 8 с (значение по умолчанию
+      # в RemoteExtractionProvider); увеличенный таймаут задаётся здесь.
+      EXTRACTION_TIMEOUT: "600"
+    depends_on:
+      ml-extraction:
+        condition: service_healthy
+
+  # CSS интерфейса свёрстан под светлую тему; при тёмной теме браузера Streamlit
+  # переключается на тёмную базу и текст становится нечитаемым. Тема фиксируется
+  # до появления тёмной вёрстки.
+  streamlit:
+    environment:
+      STREAMLIT_THEME_BASE: "light"

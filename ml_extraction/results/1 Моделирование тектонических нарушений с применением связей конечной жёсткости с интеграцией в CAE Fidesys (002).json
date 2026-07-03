@@ -1,0 +1,406 @@
+{
+  "file": "1 Моделирование тектонических нарушений с применением связей конечной жёсткости с интеграцией в CAE Fidesys (002).docx",
+  "fragments": 12,
+  "candidates": [
+    {
+      "id": "candidate-fragment-doc-1 Моделирование тектонических нарушений -docx-p8-0",
+      "type": "Claim",
+      "payload": {
+        "material": "не указано",
+        "experiment_id": "не указано",
+        "sample": "не указано",
+        "process": "методика расчёта связей конечной жёсткости",
+        "temperature_c": null,
+        "duration_h": null,
+        "property": "жёсткость связей",
+        "effect_direction": "unknown",
+        "effect_value": null,
+        "effect_unit": null,
+        "result_value": null,
+        "result_unit": null,
+        "lab": "не указано",
+        "team": "не указано",
+        "equipment": "программный комплекс CAE Fidesys",
+        "entities": [
+          {
+            "type": "Process",
+            "name": "методика расчёта связей конечной жёсткости"
+          },
+          {
+            "type": "Equipment",
+            "name": "программный комплекс CAE Fidesys"
+          },
+          {
+            "type": "Property",
+            "name": "жёсткость связей"
+          },
+          {
+            "type": "Recommendation",
+            "name": "выбор параметров пружинных элементов в зависимости от геологического строения массива"
+          }
+        ],
+        "relations": [
+          {
+            "subject": "методика расчёта связей конечной жёсткости",
+            "predicate": "produced_effect",
+            "object": "выбор параметров пружинных элементов в зависимости от геологического строения массива"
+          }
+        ],
+        "numeric_parameters": []
+      },
+      "source": {
+        "document_id": "doc-1 Моделирование тектонических нарушений ",
+        "version_id": "local-v1",
+        "fragment_id": "fragment-doc-1 Моделирование тектонических нарушений -docx-p8",
+        "page": 1,
+        "section": "DOCX evidence unit",
+        "table": null,
+        "quote": "Методика реализована в виде автономной надстройки, написанной на языке Python, и используется совместно с отечественным программным комплексом CAE Fidesys."
+      },
+      "confidence": 0.85,
+      "status": "pending_review",
+      "review_note": null
+    },
+    {
+      "id": "candidate-fragment-doc-1 Моделирование тектонических нарушений -docx-p9-0",
+      "type": "Claim",
+      "payload": {
+        "material": "не указано",
+        "experiment_id": "не указано",
+        "sample": "не указано",
+        "process": "методика проектирования горных выработок и геомеханического сопровождения",
+        "temperature_c": null,
+        "duration_h": null,
+        "property": "эффективность применения методики",
+        "effect_direction": "increase",
+        "effect_value": null,
+        "effect_unit": null,
+        "result_value": null,
+        "result_unit": null,
+        "lab": "не указано",
+        "team": "не указано",
+        "equipment": "не указано",
+        "entities": [
+          {
+            "type": "Process",
+            "name": "проектирование горных выработок"
+          },
+          {
+            "type": "Process",
+            "name": "инженерная оценка устойчивости пород"
+          },
+          {
+            "type": "Process",
+            "name": "геомеханическое сопровождение освоения месторождений"
+          },
+          {
+            "type": "Region",
+            "name": "сейсмоактивные районы"
+          },
+          {
+            "type": "Condition",
+            "name": "сложная геологическая структура"
+          },
+          {
+            "type": "Condition",
+            "name": "множественные пересекающиеся разломы"
+          },
+          {
+            "type": "Recommendation",
+            "name": "эффективное использование методики при сложной геологии и разломах"
+          }
+        ],
+        "relations": [
+          {
+            "subject": "методика проектирования горных выработок и геомеханического сопровождения",
+            "predicate": "applies_to",
+            "object": "сейсмоактивные районы"
+          },
+          {
+            "subject": "методика проектирования горных выработок и геомеханического сопровождения",
+            "predicate": "operates_at_condition",
+            "object": "сложная геологическая структура"
+          },
+          {
+            "subject": "методика проектирования горных выработок и геомеханического сопровождения",
+            "predicate": "produced_effect",
+            "object": "эффективное использование методики при сложной геологии и разломах"
+          }
+        ],
+        "numeric_parameters": []
+      },
+      "source": {
+        "document_id": "doc-1 Моделирование тектонических нарушений ",
+        "version_id": "local-v1",
+        "fragment_id": "fragment-doc-1 Моделирование тектонических нарушений -docx-p9",
+        "page": 1,
+        "section": "DOCX evidence unit",
+        "table": null,
+        "quote": "Разработанная методика может быть эффективно использована при проектировании горных выработок, инженерной оценке устойчивости пород в сейсмоактивных районах, а также при геомеханическом сопровождении освоения месторожден"
+      },
+      "confidence": 0.7,
+      "status": "pending_review",
+      "review_note": null
+    },
+    {
+      "id": "candidate-fragment-doc-1 Моделирование тектонических нарушений -docx-p12-0",
+      "type": "Claim",
+      "payload": {
+        "material": "массивы горных пород",
+        "experiment_id": "не указано",
+        "sample": "не указано",
+        "process": "моделирование тектонических разрывов методом конечных элементов",
+        "temperature_c": null,
+        "duration_h": null,
+        "property": "устойчивость численных расчетов",
+        "effect_direction": "increase",
+        "effect_value": null,
+        "effect_unit": null,
+        "result_value": null,
+        "result_unit": null,
+        "lab": "не указано",
+        "team": "не указано",
+        "equipment": "пружинные элементы",
+        "entities": [
+          {
+            "type": "Process",
+            "name": "моделирование тектонических разрывов методом конечных элементов"
+          },
+          {
+            "type": "Material",
+            "name": "массивы горных пород"
+          },
+          {
+            "type": "Equipment",
+            "name": "пружинные элементы"
+          },
+          {
+            "type": "Property",
+            "name": "устойчивость численных расчетов"
+          }
+        ],
+        "relations": [
+          {
+            "subject": "моделирование тектонических разрывов методом конечных элементов",
+            "predicate": "uses_material",
+            "object": "массивы горных пород"
+          },
+          {
+            "subject": "моделирование тектонических разрывов методом конечных элементов",
+            "predicate": "operates_at_condition",
+            "object": "пружинные элементы"
+          },
+          {
+            "subject": "моделирование тектонических разрывов методом конечных элементов",
+            "predicate": "produced_effect",
+            "object": "устойчивость численных расчетов"
+          }
+        ],
+        "numeric_parameters": []
+      },
+      "source": {
+        "document_id": "doc-1 Моделирование тектонических нарушений ",
+        "version_id": "local-v1",
+        "fragment_id": "fragment-doc-1 Моделирование тектонических нарушений -docx-p12",
+        "page": 1,
+        "section": "DOCX evidence unit",
+        "table": null,
+        "quote": "This approach to representing weakened zones eliminates the need to modify the base geometry of the model, simplifies its topology, and improves the stability of numerical calculations."
+      },
+      "confidence": 0.85,
+      "status": "pending_review",
+      "review_note": null
+    },
+    {
+      "id": "candidate-fragment-doc-1 Моделирование тектонических нарушений -docx-p13-0",
+      "type": "Claim",
+      "payload": {
+        "material": "не указано",
+        "experiment_id": "не указано",
+        "sample": "не указано",
+        "process": "вычислительная модель",
+        "temperature_c": null,
+        "duration_h": null,
+        "property": "жесткость связей",
+        "effect_direction": "unknown",
+        "effect_value": null,
+        "effect_unit": null,
+        "result_value": null,
+        "result_unit": null,
+        "lab": "не указано",
+        "team": "не указано",
+        "equipment": "CAE Fidesys",
+        "entities": [
+          {
+            "type": "Process",
+            "name": "вычислительная модель"
+          },
+          {
+            "type": "Equipment",
+            "name": "CAE Fidesys"
+          },
+          {
+            "type": "Property",
+            "name": "жесткость связей"
+          },
+          {
+            "type": "Condition",
+            "name": "геомеханические задачи"
+          }
+        ],
+        "relations": [
+          {
+            "subject": "вычислительная модель",
+            "predicate": "operates_at_condition",
+            "object": "геомеханические задачи"
+          }
+        ],
+        "numeric_parameters": []
+      },
+      "source": {
+        "document_id": "doc-1 Моделирование тектонических нарушений ",
+        "version_id": "local-v1",
+        "fragment_id": "fragment-doc-1 Моделирование тектонических нарушений -docx-p13",
+        "page": 1,
+        "section": "DOCX evidence unit",
+        "table": null,
+        "quote": "The methodology is implemented as a standalone Python-based module and is used in conjunction with the domestic CAE Fidesys software package."
+      },
+      "confidence": 0.85,
+      "status": "pending_review",
+      "review_note": null
+    },
+    {
+      "id": "candidate-fragment-doc-1 Моделирование тектонических нарушений -docx-p13-1",
+      "type": "Claim",
+      "payload": {
+        "material": "не указано",
+        "experiment_id": "не указано",
+        "sample": "не указано",
+        "process": "методология",
+        "temperature_c": null,
+        "duration_h": null,
+        "property": "рекомендации по выбору параметров пружинных элементов",
+        "effect_direction": "unknown",
+        "effect_value": null,
+        "effect_unit": null,
+        "result_value": null,
+        "result_unit": null,
+        "lab": "не указано",
+        "team": "не указано",
+        "equipment": null,
+        "entities": [
+          {
+            "type": "Recommendation",
+            "name": "рекомендации по выбору параметров пружинных элементов"
+          },
+          {
+            "type": "Condition",
+            "name": "геологическое строение массива"
+          },
+          {
+            "type": "Condition",
+            "name": "степень тектонической трещиноватости"
+          }
+        ],
+        "relations": [
+          {
+            "subject": "методология",
+            "predicate": "produced_effect",
+            "object": "рекомендации по выбору параметров пружинных элементов"
+          }
+        ],
+        "numeric_parameters": []
+      },
+      "source": {
+        "document_id": "doc-1 Моделирование тектонических нарушений ",
+        "version_id": "local-v1",
+        "fragment_id": "fragment-doc-1 Моделирование тектонических нарушений -docx-p13",
+        "page": 1,
+        "section": "DOCX evidence unit",
+        "table": null,
+        "quote": "In addition, the article provides recommendations for selecting spring element parameters based on the geological structure of the rock mass, the degree of tectonic fracturing, and the specifics of the engineering proble"
+      },
+      "confidence": 0.8,
+      "status": "pending_review",
+      "review_note": null
+    },
+    {
+      "id": "candidate-fragment-doc-1 Моделирование тектонических нарушений -docx-p14-0",
+      "type": "Claim",
+      "payload": {
+        "material": "не указано",
+        "experiment_id": "не указано",
+        "sample": "не указано",
+        "process": "геомеханическая поддержка",
+        "temperature_c": null,
+        "duration_h": null,
+        "property": "устойчивость пород",
+        "effect_direction": "increase",
+        "effect_value": null,
+        "effect_unit": null,
+        "result_value": null,
+        "result_unit": null,
+        "lab": "не указано",
+        "team": "не указано",
+        "equipment": null,
+        "entities": [
+          {
+            "type": "Process",
+            "name": "геомеханическая поддержка"
+          },
+          {
+            "type": "Process",
+            "name": "оценка устойчивости пород"
+          },
+          {
+            "type": "Condition",
+            "name": "сложные геологические структуры"
+          },
+          {
+            "type": "Condition",
+            "name": "множественные пересекающиеся разломы"
+          },
+          {
+            "type": "Region",
+            "name": "сейсмически активные регионы"
+          },
+          {
+            "type": "Property",
+            "name": "устойчивость пород"
+          }
+        ],
+        "relations": [
+          {
+            "subject": "геомеханическая поддержка",
+            "predicate": "operates_at_condition",
+            "object": "сложные геологические структуры"
+          },
+          {
+            "subject": "оценка устойчивости пород",
+            "predicate": "operates_at_condition",
+            "object": "множественные пересекающиеся разломы"
+          },
+          {
+            "subject": "геомеханическая поддержка",
+            "predicate": "applies_to",
+            "object": "сейсмически активные регионы"
+          }
+        ],
+        "numeric_parameters": []
+      },
+      "source": {
+        "document_id": "doc-1 Моделирование тектонических нарушений ",
+        "version_id": "local-v1",
+        "fragment_id": "fragment-doc-1 Моделирование тектонических нарушений -docx-p14",
+        "page": 1,
+        "section": "DOCX evidence unit",
+        "table": null,
+        "quote": "The developed methodology can be effectively applied in the design of mining excavations, engineering assessment of rock stability in seismically active regions, and geomechanical support for resource extraction projects"
+      },
+      "confidence": 0.8,
+      "status": "pending_review",
+      "review_note": null
+    }
+  ]
+}

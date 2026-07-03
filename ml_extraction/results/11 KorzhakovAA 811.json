@@ -1,0 +1,99 @@
+{
+  "file": "11 KorzhakovAA 811.docx",
+  "fragments": 12,
+  "candidates": [
+    {
+      "id": "candidate-fragment-doc-11 KorzhakovAA 811-docx-p13-0",
+      "type": "Claim",
+      "payload": {
+        "material": "катодный материал NCM",
+        "experiment_id": "не указано",
+        "sample": "прекурсор катодного материала NCM",
+        "process": "соосаждение",
+        "temperature_c": null,
+        "duration_h": null,
+        "property": "насыпная плотность, микроструктура поверхности, электрохимические характеристики, ресурс",
+        "effect_direction": "increase",
+        "effect_value": null,
+        "effect_unit": null,
+        "result_value": null,
+        "result_unit": null,
+        "lab": "не указано",
+        "team": "не указано",
+        "equipment": "реактор периодического действия",
+        "entities": [
+          {
+            "type": "Material",
+            "name": "катодный материал NCM"
+          },
+          {
+            "type": "Process",
+            "name": "соосаждение"
+          },
+          {
+            "type": "Equipment",
+            "name": "реактор периодического действия"
+          },
+          {
+            "type": "Property",
+            "name": "насыпная плотность"
+          },
+          {
+            "type": "Property",
+            "name": "микроструктура поверхности"
+          },
+          {
+            "type": "Property",
+            "name": "электрохимические характеристики"
+          },
+          {
+            "type": "Property",
+            "name": "ресурс"
+          },
+          {
+            "type": "NumericParameter",
+            "name": "объем реактора"
+          }
+        ],
+        "relations": [
+          {
+            "subject": "соосаждение",
+            "predicate": "uses_material",
+            "object": "катодный материал NCM"
+          },
+          {
+            "subject": "соосаждение",
+            "predicate": "operates_at_condition",
+            "object": "реактор периодического действия"
+          },
+          {
+            "subject": "соосаждение",
+            "predicate": "produced_effect",
+            "object": "насыпная плотность"
+          }
+        ],
+        "numeric_parameters": [
+          {
+            "name": "объем реактора",
+            "value": 10,
+            "value_max": null,
+            "unit": "дм3",
+            "raw_text": "объемом 10 дм3"
+          }
+        ]
+      },
+      "source": {
+        "document_id": "doc-11 KorzhakovAA 811",
+        "version_id": "local-v1",
+        "fragment_id": "fragment-doc-11 KorzhakovAA 811-docx-p13",
+        "page": 1,
+        "section": "DOCX evidence unit",
+        "table": null,
+        "quote": "Их жесткий контроль в процессе соосаждения в реакторе периодического действия объемом 10 дм3 без отражательных перегородок позволил получить материал с заведомо предпочтительными физико-химическими характеристиками."
+      },
+      "confidence": 0.85,
+      "status": "pending_review",
+      "review_note": null
+    }
+  ]
+}
