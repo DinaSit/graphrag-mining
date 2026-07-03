@@ -1,0 +1,12 @@
+weights:
+  material_match: 0.30
+  property_match: 0.25
+  condition_match: 0.20
+  source_confidence: 0.20
+  lexical_overlap: 0.05
+prefer:
+  - approved_facts
+  - direct_sources
+  - complete_experiment_context
+  - independent_laboratories
+

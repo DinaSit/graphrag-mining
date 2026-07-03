@@ -1,0 +1,335 @@
+version: rnd-metallurgy-v1
+description: "Онтология горно-металлургического R&D по файлу Онтология.xlsx"
+source: "Онтология.xlsx"
+
+entity_types:
+  Material:
+    description: "Материалы, вещества, сырье, реагенты, продукты, отходы, выбросы."
+    properties:
+      - id
+      - name
+      - type
+      - formula
+      - composition
+      - state
+    examples:
+      - "никель"
+      - "медь"
+      - "штейн"
+      - "шлак"
+      - "сульфатный электролит"
+      - "гипс"
+      - "SO₂"
+      - "Black Mass"
+      - "ЛИБ"
+      - "хвосты"
+
+  Process:
+    description: "Технологические процессы, методы, операции, технологические решения."
+    properties:
+      - id
+      - name
+      - type
+      - mode
+      - scale
+    examples:
+      - "плавка DON"
+      - "электроэкстракция Ni"
+      - "обратный осмос"
+      - "циркуляция католита"
+      - "флотация"
+      - "схема подачи шихты"
+
+  Equipment:
+    description: "Оборудование, установки, аппараты, оснастка: ванны, печи, системы, мембраны, электроды."
+    properties:
+      - id
+      - name
+      - type
+      - specifications
+    examples:
+      - "печь ВП"
+      - "электролизер EMEW"
+      - "диафрагма"
+      - "анодный мешок"
+      - "мембрана RO"
+      - "система очистки газов"
+
+  Property:
+    description: "Качественные свойства материалов и процессов. Числовые параметры хранятся в NumericParameter."
+    properties:
+      - id
+      - name
+      - type
+      - value
+    examples:
+      - "кристаллическая решетка: кубическая"
+      - "цвет: серый"
+      - "агрегатное состояние: жидкое"
+      - "тип проводимости: металлическая"
+
+  NumericParameter:
+    description: "Числовые параметры процессов, материалов и оборудования в нормализованном виде. Все значения хранятся с единицами измерения."
+    properties:
+      - id
+      - name
+      - type
+      - value
+      - unit
+      - min
+      - max
+      - source_doc_id
+      - source_page
+    examples:
+      - "pH 3.5"
+      - "T=60°C"
+      - "плотность тока 200 А/м²"
+      - "скорость циркуляции 20-30 л/ч"
+      - "TDS ≤1000 мг/дм³"
+
+  Condition:
+    description: "Условия применения технологии или процесса: климат, среда."
+    properties:
+      - id
+      - name
+      - type
+      - value
+    examples:
+      - "климат: холодный"
+      - "среда: кислая"
+      - "среда: окислительная"
+      - "среда: сульфидная"
+
+  Experiment:
+    description: "Эксперименты, опыты, пилотные испытания, протоколы, кейсы."
+    properties:
+      - id
+      - name
+      - date
+      - type
+      - duration
+      - source_doc_id
+    examples:
+      - "опыты с анодными мешками Outotec"
+      - "испытания CFA"
+      - "эксперименты Aalto по равновесию штейн/шлак"
+
+  Publication:
+    description: "Научные публикации, отчеты, патенты, диссертации, нормативные документы, обзоры."
+    properties:
+      - id
+      - title
+      - type
+      - year
+      - language
+      - authors
+    examples:
+      - "Методы очистки шахтных вод (ОИП-02-2025)"
+      - "ИТС 12-2016"
+      - "Обзор техрешений электролиза Ni/Cu"
+
+  Expert:
+    description: "Исследователи, авторы, инженеры, руководители, носители компетенций."
+    properties:
+      - id
+      - name
+      - role
+      - position
+      - expertise
+      - affiliation
+    examples:
+      - "Евграфова А.К."
+      - "Кузнецов Р.А."
+      - "Козырев С.М."
+      - "Цымбулов Л.Б."
+
+  Facility:
+    description: "Площадки: рудники, заводы, фабрики, лаборатории, исследовательские центры. География хранится в свойствах."
+    properties:
+      - id
+      - name
+      - type
+      - location
+      - country
+    examples:
+      - "рудник Mt Keith (Австралия)"
+      - "Nikkelverk (Норвегия)"
+      - "Niihama (Япония)"
+      - "Кольская ГМК"
+      - "Aalto University"
+
+  Result:
+    description: "Результат или эффект эксперимента или процесса: выход, извлечение, степень очистки, эффективность. Только числовые результаты."
+    properties:
+      - id
+      - name
+      - type
+      - value
+      - unit
+      - source_doc_id
+      - confidence
+    examples:
+      - "извлечение Au 89%"
+      - "степень очистки 99%"
+      - "выход никеля 95%"
+      - "снижение SO₂ на 30%"
+
+  Recommendation:
+    description: "Рекомендации, ограничения, области применимости, лучшие практики, выводы."
+    properties:
+      - id
+      - text
+      - type
+      - confidence
+      - source_doc_id
+    examples:
+      - "рекомендуемая скорость циркуляции 20-30 л/ч"
+      - "ограничение: не применимо при t<0°C"
+      - "гипотеза: MgO улучшает извлечение"
+
+  Region:
+    description: "Географический регион: страны, климатические зоны, промышленные районы. Используется для фильтрации по географии."
+    properties:
+      - id
+      - name
+      - type
+      - parent_region
+    examples:
+      - "Россия"
+      - "Куба"
+      - "Австралия"
+      - "Норвегия"
+      - "Арктика"
+      - "Норильский промышленный район"
+      - "Садбери"
+
+relation_types:
+  applies_to:
+    description: "Технологическое решение или процесс применяется к материалу или региону. От uses_material отличается тем, что material не является сырьем, а является объектом применения."
+    source:
+      - Process
+    target:
+      - Material
+      - Region
+    example: "обратный осмос -> Material(шахтная вода); кучное выщелачивание -> Region(Канада)"
+
+  uses_material:
+    description: "Процесс использует материал как сырье, реагент или исходное вещество."
+    source:
+      - Process
+    target:
+      - Material
+    example: "электроэкстракция Ni -> Material(сульфатный электролит); флотация -> Material(реагент-собиратель)"
+
+  operates_at_condition:
+    description: "Процесс или эксперимент протекает при определенных условиях. Для числовых параметров используется measured_parameter."
+    source:
+      - Process
+      - Experiment
+    target:
+      - Condition
+    example: "выщелачивание -> Condition(кислая среда); плавка -> Condition(восстановительная среда)"
+
+  measured_parameter:
+    description: "В эксперименте или процессе измерялся или был зафиксирован числовой параметр с единицами."
+    source:
+      - Experiment
+      - Process
+    target:
+      - NumericParameter
+    example: "электроэкстракция -> NumericParameter(плотность тока 200 А/м²); опыты -> NumericParameter(pH 3.5)"
+
+  produced_effect:
+    description: "Эксперимент или процесс дал результат или привел к рекомендации/выводу."
+    source:
+      - Experiment
+      - Process
+    target:
+      - Result
+      - Recommendation
+    example: "опыты Outotec -> Result(анолит: 80 г/л H₂SO₄); обзор -> Recommendation(скорость 20-30 л/ч)"
+
+  validated_by:
+    description: "Результат или рекомендация подтверждены источником или экспертом. В отличие от described_in указывает уровень достоверности."
+    source:
+      - Result
+      - Recommendation
+    target:
+      - Publication
+      - Expert
+    example: "Result(извлечение Au 89%) -> Publication(статья 2023); Recommendation(скорость 20-30) -> Expert(Козырев)"
+
+  contradicts:
+    description: "Один вывод или рекомендация противоречит другому. Используется для выявления зон разногласий."
+    source:
+      - Result
+      - Recommendation
+    target:
+      - Result
+      - Recommendation
+    example: "Result(скорость 10 л/ч оптимальна) -> contradicts -> Result(скорость 30 л/ч оптимальна)"
+
+  authored_by:
+    description: "Публикация написана экспертом."
+    source:
+      - Publication
+    target:
+      - Expert
+    example: "Методы очистки шахтных вод -> Expert(Евграфова А.К.)"
+
+  expert_in:
+    description: "Эксперт специализируется в области процесса, материала или оборудования."
+    source:
+      - Expert
+    target:
+      - Process
+      - Material
+      - Equipment
+    example: "Expert(Козырев С.М.) -> Process(электроэкстракция Ni); Expert(Иванов) -> Material(никель)"
+
+  applied_in:
+    description: "Технология или процесс применяется или внедрен в регионе."
+    source:
+      - Process
+    target:
+      - Region
+    example: "кучное выщелачивание -> Region(Канада); закачка шахтных вод -> Region(Россия)"
+
+  worked_on:
+    description: "Эксперт работал над экспериментом или проектом."
+    source:
+      - Expert
+    target:
+      - Experiment
+    example: "Expert(Кузнецов Р.А.) -> Experiment(опыты с анодными мешками)"
+
+  described_in:
+    description: "Сущность описана в публикации. Нейтральная ссылка без указания достоверности."
+    source:
+      - Any
+    target:
+      - Publication
+    example: "Process(электроэкстракция) -> Publication(Обзор техрешений); Experiment(опыты) -> Publication(ОИП-06-2018)"
+
+  researched:
+    description: "Лаборатория или площадка исследовала материал."
+    source:
+      - Facility
+    target:
+      - Material
+    example: "Aalto University -> Material(штейн); Лаборатория №5 -> Material(гипс)"
+
+  validated:
+    description: "Лаборатория или площадка подтвердила результат."
+    source:
+      - Facility
+    target:
+      - Result
+    example: "Aalto University -> Result(коэффициент распределения 2.5); НИИ -> Result(извлечение 89%)"
+
+provenance_rules:
+  required_source_fields:
+    - document_id
+    - version_id
+    - source_fragment_id
+  note: "Document, SourceFragment и внутренние Claim/Candidate остаются техническими сущностями хранения и трассировки, а не доменными типами онтологии."

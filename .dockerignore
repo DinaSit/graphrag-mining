@@ -1,0 +1,15 @@
+.git
+.venv
+.pnpm-store
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.mypy_cache
+frontend
+backend/uvicorn.*.log
+backend/*.pid
+postgres-data
+neo4j-data
+minio-data
+storage
+*.log

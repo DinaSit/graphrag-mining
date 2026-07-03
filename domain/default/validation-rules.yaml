@@ -1,0 +1,12 @@
+candidate_thresholds:
+  auto_approve: 0.85
+  review_min: 0.60
+required_source:
+  fact: true
+  hypothesis: true
+allowed_effect_directions:
+  - increase
+  - decrease
+  - neutral
+  - unknown
+

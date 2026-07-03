@@ -1,0 +1,13 @@
+temperature:
+  canonical: C
+  aliases: ["C", "°C", "с", "°с"]
+duration:
+  canonical: h
+  aliases: ["h", "ч", "час", "часов"]
+relative_effect:
+  canonical: "%"
+  aliases: ["%", "percent", "процент"]
+hardness:
+  canonical: HV
+  aliases: ["HV", "hv", "Виккерс"]
+

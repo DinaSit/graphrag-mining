@@ -1,0 +1,27 @@
+canonical,alias,type
+Сплав X,сплав x,Material
+Сплав X,alloy x,Material
+Сплав X,материал x,Material
+Сплав Y,сплав y,Material
+Сплав Z,сплав z,Material
+Композит A,композит a,Material
+Никелевый сплав N,никелевый сплав n,Material
+твёрдость,твердость,Property
+твёрдость,hardness,Property
+прочность,strength,Property
+пластичность,ductility,Property
+вязкость,toughness,Property
+коррозионная стойкость,corrosion resistance,Property
+шахтные воды,mine water,Material
+шахтные воды,шахтная вода,Material
+католит,catholyte,Material
+никелевые катоды,nickel cathodes,Material
+сульфаты,sulfates,Property
+сульфаты,сульфат,Property
+хлориды,chlorides,Property
+хлориды,хлорид,Property
+сухой остаток,total dissolved solids,Property
+скорость циркуляции католита,catholyte circulation velocity,Property
+выход металла,metal yield,Property
+обессоливание,desalination,Process
+электроэкстракция никеля,nickel electrowinning,Process

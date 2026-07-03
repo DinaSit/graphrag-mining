@@ -1,0 +1,7 @@
+compare_experiments:
+  ru: "Что делали с {material} при {temperature_min}-{temperature_max} °C и как изменялось свойство {property}?"
+  fields: [material, temperature_min, temperature_max, property]
+gap_analysis:
+  ru: "Какие пробелы есть по комбинации материал - режим - свойство?"
+  fields: [material, process, property]
+
