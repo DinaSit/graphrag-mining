@@ -25,3 +25,210 @@ canonical,alias,type
 выход металла,metal yield,Property
 обессоливание,desalination,Process
 электроэкстракция никеля,nickel electrowinning,Process
+Ca,calcium,Material
+Ca,кальций,Material
+HiPRO,HiPRO high-recovery RO,Process
+Mg,magnesium,Material
+Mg,магний,Material
+Na,sodium,Material
+Na,натрий,Material
+SAVMIN,SAVMIN process,Process
+биологическое восстановление сульфата,biological sulfate reduction,Process
+гипс,gypsum,Material
+гипс,CaSO₄·2H₂O,Material
+засушливый регион,arid region,Condition
+засушливый регион,water-scarce region,Condition
+известняк,limestone,Material
+известняк,CaCO₃,Material
+известь,lime,Material
+известь,Ca(OH)₂,Material
+ионный обмен,ion exchange,Process
+ионный обмен,IX,Process
+испарение,evaporation,Process
+испарение,thermal evaporation,Process
+исходная вода,feed water,Material
+исходная вода,raw water,Material
+мембранная дистилляция,membrane distillation,Process
+нанофильтрация,nanofiltration,Process
+нанофильтрация,NF,Process
+нейтрализация известью,lime neutralization,Process
+обессоливание,demineralization,Process
+обогатительная фабрика,processing plant,Facility
+обогатительная фабрика,concentrator,Facility
+обогатительная фабрика,О/Ф,Facility
+обратный осмос,reverse osmosis,Process
+обратный осмос,RO,Process
+осаждение сульфатом бария,barium sulfate precipitation,Process
+процесс HDS,High Density Sludge process,Process
+сульфаты,SO₄²⁻,Material
+сухой остаток,TDS,NumericParameter
+технология замораживания,freezing technology,Process
+хлориды,Cl⁻,Material
+Чили,Chile,Region
+шахтные воды,MIW,Material
+электродиализ,electrodialysis,Process
+электродиализ,ED,Process
+эттрингит,ettringite,Material
+ЮАР,South Africa,Region
+ЮАР,RSA,Region
+EMEW,EMEW cell,Equipment
+METTOP-BRX,METTOP-BRX technology,Process
+Niihama,Niihama nickel refinery (Japan),Facility
+Nikkelverk,Nikkelverk refinery (Norway),Facility
+анодные мешки,anode bags,Equipment
+анодные мешки,anode diaphragms,Equipment
+анолит,anolyte,Material
+анолит,anode electrolyte,Material
+выход по току,current efficiency,NumericParameter
+гидростатический напор,hydrostatic head,NumericParameter
+диафрагма,diaphragm,Equipment
+катод,cathode,Equipment
+катод,starting sheet,Equipment
+католит,cathode electrolyte,Material
+мембрана,membrane,Equipment
+оптимальная скорость потока,optimal flow rate,NumericParameter
+перенапряжение,overpotential,NumericParameter
+плотность тока,current density,NumericParameter
+рециркуляция католита,catholyte recirculation,Process
+скорость потока,flow rate,NumericParameter
+скорость потока,flow velocity,NumericParameter
+сульфатный электролит,sulfate electrolyte,Material
+температура электролита,electrolyte temperature,NumericParameter
+технология параллельных потоков,parallel flow technology,Process
+хлоридный электролит,chloride electrolyte,Material
+циркуляция католита,catholyte circulation,Process
+электролизер,electrolytic cell,Equipment
+электролизер,electrolyzer,Equipment
+Aalto University,Aalto University (Finland),Expert
+Ag,silver,Material
+Ag,серебро,Material
+Au,gold,Material
+Au,золото,Material
+ICP-MS,ICP-MS,Equipment
+ICP-MS,LA-ICP-MS,Equipment
+Pd,palladium,Material
+Pekka Taskinen,Pekka Taskinen,Expert
+Pt,platinum,Material
+Rh,rhodium,Material
+Ru,ruthenium,Material
+благородные металлы,precious metals,Material
+благородные металлы,noble metals,Material
+взвешенная плавка,flash smelting,Process
+взвешенная плавка,ПВП,Process
+диаграмма Язавы,Yazawa diagram,Property
+железосиликатный шлак,iron-silicate slag,Material
+железосиликатный шлак,fayalite slag,Material
+закалка,quenching,Process
+коэффициент распределения,distribution coefficient,NumericParameter
+магнетит,magnetite,Material
+магнетит,Fe₃O₄,Material
+медленное охлаждение,slow cooling,Process
+медный штейн,copper matte,Material
+МПГ,PGM (platinum group metals),Material
+никелевый штейн,nickel matte,Material
+парциальное давление,partial pressure (pO₂,NumericParameter
+парциальное давление,pS₂,NumericParameter
+парциальное давление,pSO₂),NumericParameter
+потери металлов со шлаком,metal losses to slag,Result
+публикация,publication,Publication
+публикация,article,Publication
+равновесие штейн/шлак,matte/slag equilibrium,Condition
+сортность штейна,matte grade (%Cu),NumericParameter
+флотация шлаков,slag flotation,Process
+шлак,slag,Material
+штейн,matte,Material
+эксперимент,experiment,Experiment
+эксперимент,experimental study,Experiment
+электронный микрозонд,EPMA,Equipment
+электронный микрозонд,electron microprobe,Equipment
+MODFLOW,MODFLOW (USGS),Equipment
+водоносный горизонт,aquifer,Material
+водоносный горизонт,water-bearing horizon,Material
+геофильтрационная модель,geofiltration model,Equipment
+геоэкологические проблемы,geoenvironmental issues,Condition
+гидрогеология,hydrogeology,Property
+депрессионная воронка,depression cone,NumericParameter
+депрессионная воронка,drawdown cone,NumericParameter
+дренаж,drainage,Process
+закачка,injection,Process
+закачка,pumping,Process
+зарубежом,abroad,Region
+зарубежом,foreign countries,Region
+излив шахтных вод,mine water discharge,Process
+литиеносные рассолы,lithium-bearing brines,Material
+нагнетательная скважина,injection well,Equipment
+обратная закачка,reverse injection,Process
+обратная закачка,reinjection,Process
+пластовое давление,formation pressure,NumericParameter
+подземное захоронение,underground disposal,Process
+Россия,Russia,Region
+стоимость,cost,NumericParameter
+стоимость,cost indicators,NumericParameter
+технико-экономические показатели,techno-economic indicators,Result
+технико-экономические показатели,TEP,Result
+утилизация бурового шлама,drill cuttings disposal,Process
+брикетирование,briquetting,Process
+брикетирование без связующего,binderless briquetting,Process
+брэкс,BREX (briquette extrusion),Material
+валковое брикетирование,roller briquetting,Process
+валковый пресс,roll press,Equipment
+валковый пресс,roller press,Equipment
+вибропрессование,vibro-pressing,Process
+влажность,moisture content,NumericParameter
+восстановимость,reducibility,Property
+гранулометрический состав,particle size distribution,NumericParameter
+гранулометрический состав,PSD,NumericParameter
+давление прессования,pressing pressure,NumericParameter
+жесткая вакуумная экструзия,stiff vacuum extrusion,Process
+кгс,kgf,NumericParameter
+кгс,kilogram-force,NumericParameter
+"класс менее 0,05 мм",fraction minus 0.05 mm,NumericParameter
+крупность,particle size,NumericParameter
+марганцевая рудная мелочь,manganese ore fines,Material
+неорганическое связующее,inorganic binder,Material
+органическое связующее,organic binder,Material
+производительность пресса,press throughput,NumericParameter
+пыль газоочистки,gas cleaning dust,Material
+рудная мелочь,ore fines,Material
+связующее,binder,Material
+синтер,sinter,Material
+смеситель Айриха,Eirich mixer,Equipment
+таблетирование,tableting,Process
+фракция 0–3 мм,fraction 0–3 mm,NumericParameter
+фракция <10 мкм,fraction under 10 µm,NumericParameter
+холодная прочность,cold crushing strength,NumericParameter
+холодная прочность,CCS,NumericParameter
+цемент,cement,Material
+цемент,Portland cement,Material
+шихта,charge,Material
+шихта,burden,Material
+Caletones,Caletones smelter (Chile),Facility
+Jameson Cell,Jameson flotation cell,Equipment
+SAG мельница,SAG mill,Equipment
+белый матт,white matte (~75% Cu),Material
+вдувание пылевидного угля,pulverized coal injection,Process
+восстановитель,reductant,Material
+восстановитель,reducing agent,Material
+время выдержки,residence time,NumericParameter
+время выдержки,holding time,NumericParameter
+вязкость шлака,slag viscosity,Property
+извлечение Cu,copper recovery,Result
+кислородная горелка,oxygen burner,Equipment
+кокс,coke,Material
+конвертер Teniente,Teniente converter,Equipment
+конвертер Пирса-Смита,Peirce-Smith converter,Equipment
+обеднение шлаков,slag cleaning,Process
+обеднение шлаков,slag reduction,Process
+обеднительная печь,slag cleaning furnace,Equipment
+обеднительная печь Teniente,Teniente slag cleaning furnace,Equipment
+остаточное содержание Cu,residual Cu content,NumericParameter
+отвальный шлак,discard slag,Material
+отвальный шлак,final slag,Material
+отстаивание,settling,Process
+плавильный шлак,smelting slag,Material
+природный газ,natural gas,Material
+производительность,throughput,NumericParameter
+производительность,capacity,NumericParameter
+расход восстановителя,reductant consumption,NumericParameter
+форма потерь меди,copper loss forms,Property
+электропечь,electric furnace,Equipment
