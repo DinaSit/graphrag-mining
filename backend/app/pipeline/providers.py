@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
 import urllib.error
 import urllib.request
@@ -185,6 +186,9 @@ class RemoteExtractionProvider:
     def __init__(self, extract_url: str, fallback: MockLLMProvider | None = None):
         self.extract_url = extract_url
         self.fallback = fallback or MockLLMProvider()
+        # Реальный LLM-сервис обрабатывает батч фрагментов дольше 8с;
+        # таймаут настраивается снаружи (EXTRACTION_TIMEOUT, секунды)
+        self.timeout = float(os.environ.get("EXTRACTION_TIMEOUT", "8"))
 
     def extract_entities(self, fragments: list[SourceFragment]) -> list[ExtractionCandidate]:
         payload = {"fragments": [fragment.model_dump(mode="json") for fragment in fragments]}
@@ -195,7 +199,7 @@ class RemoteExtractionProvider:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=8) as response:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
                 data = json.loads(response.read().decode("utf-8"))
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
             return self.fallback.extract_entities(fragments)
