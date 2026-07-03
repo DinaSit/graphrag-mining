@@ -42,6 +42,9 @@ services:
       # Реальное извлечение обрабатывает батч дольше 8 с (значение по умолчанию
       # в RemoteExtractionProvider); увеличенный таймаут задаётся здесь.
       EXTRACTION_TIMEOUT: "600"
+      # Семантический индекс: эмбеддинги Yandex v2 (256 изм.) через сервис ml-extraction.
+      # Убрать переменную — backend вернётся на deterministic-hash (64).
+      EMBEDDINGS_URL: http://ml-extraction:8002/embed
     depends_on:
       ml-extraction:
         condition: service_healthy

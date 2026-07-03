@@ -49,3 +49,14 @@ class ExtractRequest(BaseModel):
 
 class ExtractResponse(BaseModel):
     candidates: list[ExtractionCandidate]
+
+
+class EmbedRequest(BaseModel):
+    texts: list[str]
+    kind: str = Field(default="doc", description="doc — индексация фрагментов, query — поисковые запросы")
+
+
+class EmbedResponse(BaseModel):
+    embeddings: list[list[float]]
+    dimensions: int
+    model: str
