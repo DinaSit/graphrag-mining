@@ -1,0 +1,5 @@
+# Локальные файлы ML-A: в репозиторий не попадают
+README.md
+results/
+scripts/probe_api.py
+__pycache__/
