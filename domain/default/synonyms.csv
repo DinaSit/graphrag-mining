@@ -232,3 +232,31 @@ SAG мельница,SAG mill,Equipment
 расход восстановителя,reductant consumption,NumericParameter
 форма потерь меди,copper loss forms,Property
 электропечь,electric furnace,Equipment
+pH,pH,NumericParameter
+pH,водородный показатель,NumericParameter
+окислительно-восстановительный потенциал,redox potential,NumericParameter
+окислительно-восстановительный потенциал,Eh,NumericParameter
+степень удаления,removal efficiency,Result
+степень удаления,recovery,Result
+мутность,turbidity,NumericParameter
+электропроводность,electrical conductivity,NumericParameter
+электропроводность,conductivity,NumericParameter
+размер пор мембраны,membrane pore size,Property
+содержание Ni в электролите,Ni concentration in electrolyte,NumericParameter
+борная кислота,boric acid,Material
+борная кислота,H₃BO₃,Material
+межэлектродное расстояние,interelectrode distance,NumericParameter
+толщина катодного осадка,cathode deposit thickness,NumericParameter
+расход электроэнергии,energy consumption,NumericParameter
+расход электроэнергии,power consumption,NumericParameter
+извлечение благородных металлов,precious metals recovery,Result
+содержание металла в руде,metal grade in ore,NumericParameter
+расход реагента,reagent consumption,NumericParameter
+удельный расход энергии,specific energy consumption,NumericParameter
+ультрафильтрация,ultrafiltration,Process
+ультрафильтрация,UF,Process
+микрофильтрация,microfiltration,Process
+микрофильтрация,MF,Process
+цианирование,cyanidation,Process
+хлорное выщелачивание,chlorine leaching,Process
+гравитационное обогащение,gravity concentration,Process

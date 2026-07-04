@@ -10,3 +10,195 @@ allowed_effect_directions:
   - neutral
   - unknown
 
+params:
+  скорость потока:
+    quantity: flow_rate
+    node_type: NumericParameter
+    min: 0.1
+    max: 500
+  плотность тока:
+    quantity: current_density
+    node_type: NumericParameter
+    min: 100
+    max: 500
+  выход по току:
+    quantity: relative_effect
+    node_type: NumericParameter
+    min: 80
+    max: 100
+  перенапряжение:
+    quantity: voltage
+    node_type: NumericParameter
+    min: 0.1
+    max: 10
+  температура электролита:
+    quantity: temperature
+    node_type: NumericParameter
+    min: 0
+    max: 100
+  сухой остаток:
+    quantity: concentration
+    node_type: NumericParameter
+    min: 0
+    max: 25000
+  TDS:
+    quantity: concentration
+    node_type: NumericParameter
+    min: 0
+    max: 25000
+  гидростатический напор:
+    quantity: length_m
+    node_type: NumericParameter
+    min: 0.1
+    max: 100
+  депрессионная воронка:
+    quantity: length_m
+    node_type: NumericParameter
+    min: 0
+    max: 50000
+  производительность:
+    quantity: flow_rate
+    node_type: NumericParameter
+    min: 1
+    max: 50000
+
+  pH:
+    quantity: dimensionless
+    node_type: NumericParameter
+    min: 0
+    max: 14
+  окислительно-восстановительный потенциал:
+    quantity: voltage_mv
+    node_type: NumericParameter
+    min: -500
+    max: 800
+  степень удаления:
+    quantity: relative_effect
+    node_type: Result
+    min: 0
+    max: 100
+  мутность:
+    quantity: turbidity
+    node_type: NumericParameter
+    min: 0
+    max: 1000
+  электропроводность:
+    quantity: conductivity
+    node_type: NumericParameter
+    min: 0.1
+    max: 100
+  размер пор мембраны:
+    quantity: length_um
+    node_type: NumericParameter
+    min: 0.0001
+    max: 5
+
+  содержание Ni в электролите:
+    quantity: concentration_high
+    node_type: NumericParameter
+    min: 40
+    max: 80
+  концентрация H3BO3:
+    quantity: concentration_high
+    node_type: NumericParameter
+    min: 5
+    max: 15
+  межэлектродное расстояние:
+    quantity: length
+    node_type: NumericParameter
+    min: 20
+    max: 100
+  толщина катодного осадка:
+    quantity: length
+    node_type: NumericParameter
+    min: 1
+    max: 10
+  расход электроэнергии:
+    quantity: specific_energy
+    node_type: NumericParameter
+    min: 2000
+    max: 6000
+
+  коэффициент распределения:
+    quantity: dimensionless
+    node_type: NumericParameter
+    min: 0
+    max: 100000
+  сортность штейна:
+    quantity: relative_effect
+    node_type: NumericParameter
+    min: 0
+    max: 100
+  температура:
+    quantity: temperature
+    node_type: NumericParameter
+    min: 0
+    max: 1600
+  извлечение Cu:
+    quantity: relative_effect
+    node_type: Result
+    min: 0
+    max: 100
+  остаточное содержание Cu:
+    quantity: relative_effect
+    node_type: NumericParameter
+    min: 0
+    max: 50
+
+  извлечение благородных металлов:
+    quantity: relative_effect
+    node_type: Result
+    min: 0
+    max: 100
+  содержание металла в руде:
+    quantity: concentration_trace
+    node_type: NumericParameter
+    min: 0.1
+    max: 1000
+  расход реагента:
+    quantity: concentration_trace
+    node_type: NumericParameter
+    min: 1
+    max: 10000
+
+  влажность:
+    quantity: relative_effect
+    node_type: NumericParameter
+    min: 0
+    max: 100
+  крупность:
+    quantity: length
+    node_type: NumericParameter
+    min: 0.001
+    max: 200
+  класс менее 0,05 мм:
+    quantity: relative_effect
+    node_type: NumericParameter
+    min: 0
+    max: 100
+  холодная прочность:
+    quantity: force
+    node_type: NumericParameter
+    min: 1
+    max: 1000
+  давление прессования:
+    quantity: pressure
+    node_type: NumericParameter
+    min: 0.01
+    max: 300
+  производительность пресса:
+    quantity: mass_flow
+    node_type: NumericParameter
+    min: 0.1
+    max: 1400
+  время выдержки:
+    quantity: duration
+    node_type: NumericParameter
+    min: 0.1
+    max: 168
+
+  парциальное давление:
+    quantity: pressure
+    node_type: NumericParameter
+    min: 0
+    max: 10

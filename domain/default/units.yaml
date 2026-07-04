@@ -7,7 +7,57 @@ duration:
 relative_effect:
   canonical: "%"
   aliases: ["%", "percent", "процент"]
-hardness:
-  canonical: HV
-  aliases: ["HV", "hv", "Виккерс"]
-
+flow_rate:
+  canonical: m3/h
+  aliases: ["m3/h", "м³/ч"]
+force:
+  canonical: kgf
+  aliases: ["kgf", "кгс", "kilogram-force"]
+pressure:
+  canonical: MPa
+  aliases: ["MPa", "МПа"]
+pressure_bar:
+  canonical: bar
+  aliases: ["bar", "бар"]
+pressure_atm:
+  canonical: atm
+  aliases: ["atm", "атм"]
+length:
+  canonical: mm
+  aliases: ["mm", "мм"]
+length_m:
+  canonical: m
+  aliases: ["m", "м"]
+length_um:
+  canonical: μm
+  aliases: ["μm", "мкм", "um"]
+voltage:
+  canonical: V
+  aliases: ["V", "В", "в"]
+voltage_mv:
+  canonical: mV
+  aliases: ["mV", "мВ"]
+mass_flow:
+  canonical: t/h
+  aliases: ["t/h", "т/ч"]
+current_density:
+  canonical: A/m2
+  aliases: ["A/m2", "А/м²"]
+concentration:
+  canonical: mg/dm3
+  aliases: ["mg/dm3", "мг/дм³", "mg/l", "мг/л"]
+concentration_high:
+  canonical: g/dm3
+  aliases: ["g/dm3", "g/dm³", "г/дм³", "g/l", "г/л"]
+concentration_trace:
+  canonical: g/t
+  aliases: ["g/t", "г/т", "ppm"]
+specific_energy:
+  canonical: kWh/t
+  aliases: ["kWh/t", "кВт·ч/т"]
+turbidity:
+  canonical: NTU
+  aliases: ["NTU"]
+conductivity:
+  canonical: mS/cm
+  aliases: ["mS/cm", "мСм/см"]
