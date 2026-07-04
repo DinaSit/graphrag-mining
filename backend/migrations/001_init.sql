@@ -74,6 +74,7 @@ CREATE TABLE IF NOT EXISTS facts (
     confidence DOUBLE PRECISION NOT NULL,
     status VARCHAR(32) NOT NULL,
     is_hypothesis BOOLEAN NOT NULL DEFAULT FALSE,
+    conflicts_with JSONB NOT NULL DEFAULT '[]'::jsonb,
     source JSONB NOT NULL
 );
 

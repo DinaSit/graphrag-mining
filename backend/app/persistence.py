@@ -13,6 +13,7 @@ from app.schemas import (
     GraphNode,
     GraphPayload,
     SourceFragment,
+    SourceRef,
 )
 
 try:
@@ -205,12 +206,13 @@ class PostgresSink:
             INSERT INTO facts (
               id, candidate_id, material, material_id, experiment_id, sample, process, temperature_c, duration_h,
               property, effect_direction, effect_value, effect_unit, result_value, result_unit, lab, team, equipment,
-              confidence, status, is_hypothesis, source
+              confidence, status, is_hypothesis, conflicts_with, source
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)
             ON CONFLICT (id) DO UPDATE SET
               confidence = EXCLUDED.confidence,
               status = EXCLUDED.status,
+              conflicts_with = EXCLUDED.conflicts_with,
               source = EXCLUDED.source
             """,
             (
@@ -235,6 +237,7 @@ class PostgresSink:
                 fact.confidence,
                 fact.status,
                 fact.is_hypothesis,
+                json.dumps(fact.conflicts_with, ensure_ascii=False),
                 json.dumps(fact.source.model_dump(mode="json"), ensure_ascii=False),
             ),
         )
@@ -270,6 +273,9 @@ class PostgresSink:
             "ALTER TABLE documents ADD COLUMN IF NOT EXISTS storage_bucket VARCHAR(256)",
             "ALTER TABLE documents ADD COLUMN IF NOT EXISTS storage_object VARCHAR(1024)",
             "ALTER TABLE documents ADD COLUMN IF NOT EXISTS storage_uri VARCHAR(1400)",
+            "ALTER TABLE facts ADD COLUMN IF NOT EXISTS conflicts_with JSONB NOT NULL DEFAULT '[]'::jsonb",
+            # Индекс векторного поиска: близость считает PostgreSQL, а не backend
+            "CREATE INDEX IF NOT EXISTS fragment_vectors_embedding_idx ON fragment_vectors USING hnsw (embedding vector_cosine_ops)",
             # Совместимость с базами, созданными до перехода на remote-эмбеддинги
             # (256 изм.): старые векторы deterministic-hash (64) вычищаются,
             # колонка расширяется. На vector(256) блок ничего не делает.
@@ -309,6 +315,188 @@ class PostgresSink:
         except Exception as exc:  # pragma: no cover - integration-only path
             self.last_error = str(exc)
             return []
+
+    def upsert_job(self, job_id: str, job_type: str, status: str, payload: dict, error: str | None = None) -> None:
+        if not self.enabled:
+            return
+        self._execute(
+            """
+            INSERT INTO jobs (id, job_type, status, payload, error)
+            VALUES (%s, %s, %s, %s::jsonb, %s)
+            ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status, error = EXCLUDED.error
+            """,
+            (job_id, job_type, status, json.dumps(payload, ensure_ascii=False), error),
+        )
+
+    def get_job(self, job_id: str) -> dict[str, Any] | None:
+        if not self.enabled:
+            return None
+        try:
+            with psycopg.connect(self.database_url) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute("SELECT id, job_type, status, payload, error FROM jobs WHERE id = %s", (job_id,))
+                    row = cursor.fetchone()
+            if row is None:
+                return None
+            return {"job_id": row[0], "job_type": row[1], "status": row[2], "payload": row[3], "error": row[4]}
+        except Exception as exc:  # pragma: no cover - integration-only path
+            self.last_error = str(exc)
+            return None
+
+    def search_vectors(self, query_vector: list[float], top_k: int) -> list[tuple[str, float]]:
+        """Векторный поиск на стороне PostgreSQL: (fragment_id, косинусная близость)."""
+        if not self.enabled:
+            return []
+        try:
+            with psycopg.connect(self.database_url) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT fragment_id, 1 - (embedding <=> %s::vector) AS score
+                        FROM fragment_vectors
+                        WHERE embedding IS NOT NULL
+                        ORDER BY embedding <=> %s::vector
+                        LIMIT %s
+                        """,
+                        (str(query_vector), str(query_vector), top_k),
+                    )
+                    return [(row[0], float(row[1])) for row in cursor.fetchall()]
+        except Exception as exc:  # pragma: no cover - integration-only path
+            self.last_error = str(exc)
+            return []
+
+    def load_state(self) -> dict[str, dict[str, Any]]:
+        """Загружает сохранённое состояние для восстановления ApplicationStore после рестарта."""
+        state: dict[str, dict[str, Any]] = {
+            "documents": {},
+            "versions": {},
+            "fragments": {},
+            "candidates": {},
+            "facts": {},
+            "vectors": {},
+        }
+        if not self.enabled:
+            return state
+        try:
+            with psycopg.connect(self.database_url) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT id, filename, document_type, source_label, access_level, checksum,
+                               current_version_id, status, element_count, storage_bucket, storage_object,
+                               storage_uri, created_at
+                        FROM documents
+                        """
+                    )
+                    for row in cursor.fetchall():
+                        state["documents"][row[0]] = DocumentRecord(
+                            id=row[0],
+                            filename=row[1],
+                            document_type=row[2],
+                            source_label=row[3],
+                            access_level=row[4],
+                            checksum=row[5],
+                            current_version_id=row[6],
+                            status=row[7],
+                            element_count=row[8],
+                            storage_bucket=row[9],
+                            storage_object=row[10],
+                            storage_uri=row[11],
+                            created_at=row[12],
+                        )
+
+                    cursor.execute(
+                        "SELECT id, document_id, checksum, version_number, status, parser, created_at FROM document_versions"
+                    )
+                    for row in cursor.fetchall():
+                        state["versions"][row[0]] = DocumentVersion(
+                            id=row[0],
+                            document_id=row[1],
+                            checksum=row[2],
+                            version_number=row[3],
+                            status=row[4],
+                            parser=row[5],
+                            created_at=row[6],
+                        )
+
+                    cursor.execute(
+                        """
+                        SELECT id, document_id, version_id, page, element_type, section, text,
+                               normalized_text, fragment_metadata
+                        FROM source_fragments
+                        """
+                    )
+                    for row in cursor.fetchall():
+                        state["fragments"][row[0]] = SourceFragment(
+                            id=row[0],
+                            document_id=row[1],
+                            version_id=row[2],
+                            page=row[3],
+                            element_type=row[4],
+                            section=row[5],
+                            text=row[6],
+                            normalized_text=row[7],
+                            metadata=row[8] or {},
+                        )
+
+                    cursor.execute(
+                        "SELECT id, type, payload, source, confidence, status, review_note FROM extraction_candidates"
+                    )
+                    for row in cursor.fetchall():
+                        state["candidates"][row[0]] = ExtractionCandidate(
+                            id=row[0],
+                            type=row[1],
+                            payload=row[2] or {},
+                            source=SourceRef(**row[3]) if row[3] else None,
+                            confidence=row[4],
+                            status=row[5],
+                            review_note=row[6],
+                        )
+
+                    cursor.execute(
+                        """
+                        SELECT id, candidate_id, material, material_id, experiment_id, sample, process,
+                               temperature_c, duration_h, property, effect_direction, effect_value, effect_unit,
+                               result_value, result_unit, lab, team, equipment, confidence, status, is_hypothesis,
+                               conflicts_with, source
+                        FROM facts
+                        """
+                    )
+                    for row in cursor.fetchall():
+                        if not row[22]:
+                            continue
+                        state["facts"][row[0]] = Fact(
+                            id=row[0],
+                            candidate_id=row[1],
+                            material=row[2],
+                            material_id=row[3],
+                            experiment_id=row[4],
+                            sample=row[5],
+                            process=row[6],
+                            temperature_c=row[7],
+                            duration_h=row[8],
+                            property=row[9],
+                            effect_direction=row[10],
+                            effect_value=row[11],
+                            effect_unit=row[12],
+                            result_value=row[13],
+                            result_unit=row[14],
+                            lab=row[15],
+                            team=row[16],
+                            equipment=row[17],
+                            confidence=row[18],
+                            status=row[19],
+                            is_hypothesis=row[20],
+                            conflicts_with=row[21] or [],
+                            source=SourceRef(**row[22]),
+                        )
+
+                    cursor.execute("SELECT fragment_id, embedding FROM fragment_vectors WHERE embedding IS NOT NULL")
+                    for row in cursor.fetchall():
+                        state["vectors"][row[0]] = json.loads(str(row[1]))
+        except Exception as exc:  # pragma: no cover - integration-only path
+            self.last_error = str(exc)
+        return state
 
     def _execute(self, query: str, params: tuple[Any, ...]) -> None:
         self._executemany(query, [params])
@@ -387,12 +575,54 @@ class Neo4jSink:
         }
         self._write(query, params)
 
+    # Типы узлов и связей доменной онтологии (domain/default/ontology.yaml).
+    # Whitelist обязателен: label и тип связи нельзя параметризовать в Cypher.
+    ONTOLOGY_LABELS = {
+        "Material", "Process", "Equipment", "Property", "NumericParameter", "Condition",
+        "Experiment", "Publication", "Expert", "Facility", "Result", "Recommendation", "Region",
+    }
+    ONTOLOGY_RELATIONS = {
+        "applies_to", "uses_material", "operates_at_condition", "measured_parameter",
+        "produced_effect", "validated_by", "contradicts", "authored_by", "expert_in",
+        "applied_in", "worked_on", "described_in", "researched", "validated",
+    }
+
+    def upsert_semantics(self, claim_id: str, entities: list[dict], relations: list[dict]) -> None:
+        """Проецирует извлечённые сущности и связи онтологии в граф.
+
+        Сущности привязываются к Claim (провенанс: Claim -> SourceFragment уже есть),
+        связи строятся между сущностями по данным извлечения.
+        """
+        if not self.enabled:
+            return
+        entity_types = {e["name"]: e["type"] for e in entities if e.get("name") and e.get("type") in self.ONTOLOGY_LABELS}
+        for name, label in entity_types.items():
+            self._write(
+                f"MERGE (n:{label} {{id: $id}}) SET n.name = $name "
+                f"WITH n MATCH (c:Claim {{id: $claim_id}}) MERGE (c)-[:MENTIONS]->(n)",
+                {"id": f"{label.lower()}-{_slug(name)}", "name": name, "claim_id": claim_id},
+            )
+        for relation in relations:
+            subject, predicate, obj = relation.get("subject"), relation.get("predicate"), relation.get("object")
+            if predicate not in self.ONTOLOGY_RELATIONS:
+                continue
+            subject_label, object_label = entity_types.get(subject), entity_types.get(obj)
+            if not subject_label or not object_label:
+                continue  # связь ссылается на сущность, не прошедшую whitelist
+            self._write(
+                f"MATCH (a:{subject_label} {{id: $subject_id}}), (b:{object_label} {{id: $object_id}}) "
+                f"MERGE (a)-[:{predicate}]->(b)",
+                {
+                    "subject_id": f"{subject_label.lower()}-{_slug(subject)}",
+                    "object_id": f"{object_label.lower()}-{_slug(obj)}",
+                },
+            )
+
     def get_graph(self, limit: int = 80) -> GraphPayload:
         if not self.enabled:
             return GraphPayload()
         query = """
         MATCH (a)-[r]->(b)
-        WHERE a:Claim OR a:Experiment OR a:SourceFragment OR b:Claim OR b:Experiment OR b:Material
         RETURN a, type(r) AS rel, b
         LIMIT $limit
         """

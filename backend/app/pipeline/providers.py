@@ -224,19 +224,27 @@ class RemoteExtractionProvider:
         self.timeout = float(os.environ.get("EXTRACTION_TIMEOUT", "8"))
 
     def extract_entities(self, fragments: list[SourceFragment]) -> list[ExtractionCandidate]:
-        payload = {"fragments": [fragment.model_dump(mode="json") for fragment in fragments]}
-        request = urllib.request.Request(
-            self.extract_url,
-            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                data = json.loads(response.read().decode("utf-8"))
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
-            return self.fallback.extract_entities(fragments)
-        return [ExtractionCandidate.model_validate(item) for item in data.get("candidates", [])]
+        # Фрагменты отправляются пачками: один запрос на весь документ
+        # не укладывается в таймаут (особенно сканы с vision-обработкой)
+        batch_size = int(os.environ.get("EXTRACTION_BATCH_SIZE", "8"))
+        candidates: list[ExtractionCandidate] = []
+        for start in range(0, len(fragments), batch_size):
+            chunk = fragments[start : start + batch_size]
+            payload = {"fragments": [fragment.model_dump(mode="json") for fragment in chunk]}
+            request = urllib.request.Request(
+                self.extract_url,
+                data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                    data = json.loads(response.read().decode("utf-8"))
+            except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+                candidates.extend(self.fallback.extract_entities(chunk))
+                continue
+            candidates.extend(ExtractionCandidate.model_validate(item) for item in data.get("candidates", []))
+        return candidates
 
     def extract_relations(self, fragments: list[SourceFragment]) -> list[ExtractionCandidate]:
         return []

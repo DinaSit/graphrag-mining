@@ -70,9 +70,41 @@ class ApplicationStore:
         self.ontology_candidates: dict[str, OntologyCandidate] = {}
         self.fragment_vectors: dict[str, list[float]] = {}
 
+    def hydrate_from_postgres(self) -> None:
+        """Восстанавливает состояние из PostgreSQL после перезапуска backend-а."""
+        if not self.postgres_sink or not self.postgres_sink.enabled:
+            return
+        state = self.postgres_sink.load_state()
+        self.documents.update(state["documents"])
+        self.versions.update(state["versions"])
+        self.fragments.update(state["fragments"])
+        self.candidates.update(state["candidates"])
+        self.facts.update(state["facts"])
+        self.fragment_vectors.update(state["vectors"])
+        # Фрагменты без векторов (например, после смены модели эмбеддингов) индексируются заново
+        missing = [fragment for fid, fragment in self.fragments.items() if fid not in self.fragment_vectors]
+        if missing:
+            try:
+                self.index_fragments(missing)
+            except Exception as exc:
+                print(f"hydrate: переиндексация {len(missing)} фрагментов не удалась: {exc}")
+
     def add_source_fragment(self, fragment: SourceFragment) -> None:
         self.fragments[fragment.id] = fragment
         self._persist_fragments([fragment])
+
+    def find_document_by_checksum(self, checksum: str) -> DocumentRecord | None:
+        duplicate = next((doc for doc in list(self.documents.values()) if doc.checksum == checksum), None)
+        if duplicate:
+            return duplicate
+        if self.postgres_sink:
+            persisted = self.postgres_sink.get_document_by_checksum(checksum)
+            if persisted:
+                document, version = persisted
+                self.documents[document.id] = document
+                self.versions[version.id] = version
+                return document
+        return None
 
     def ingest_document(
         self,
@@ -83,16 +115,9 @@ class ApplicationStore:
         access_level: str = "uploaded",
     ) -> DocumentRecord:
         checksum = hashlib.sha256(content).hexdigest()
-        duplicate = next((doc for doc in self.documents.values() if doc.checksum == checksum), None)
+        duplicate = self.find_document_by_checksum(checksum)
         if duplicate:
             return duplicate
-        if self.postgres_sink:
-            persisted_duplicate = self.postgres_sink.get_document_by_checksum(checksum)
-            if persisted_duplicate:
-                document, version = persisted_duplicate
-                self.documents[document.id] = document
-                self.versions[version.id] = version
-                return document
 
         document_id = f"doc-{uuid4().hex[:10]}"
         version_id = f"{document_id}-v1"
@@ -173,10 +198,56 @@ class ApplicationStore:
             raise SourceRequiredError("Факт не может быть утвержден без ссылки на source fragment.")
         candidate.status = CandidateStatus.approved
         fact = self._fact_from_candidate(candidate)
+        self._mark_conflicts(fact)
         self.facts[fact.id] = fact
         self._persist_candidate(candidate)
         self._persist_fact(fact)
+        self._project_semantics(fact, candidate)
         return fact
+
+    def _mark_conflicts(self, fact: Fact) -> None:
+        """Фиксирует противоречие: тот же материал и свойство, противоположный эффект.
+
+        Оба факта остаются в базе как есть — статус conflicting лишь помечает
+        зону разногласий и хранит ссылки на оппонентов (модель верификации из плана).
+        """
+        opposite = {"increase": "decrease", "decrease": "increase"}.get(fact.effect_direction)
+        if opposite is None:
+            return
+        # list(): факты добавляются из фоновых воркеров параллельно
+        for other in list(self.facts.values()):
+            if (
+                other.material == fact.material
+                and other.property == fact.property
+                and other.effect_direction == opposite
+            ):
+                fact.status = other.status = "conflicting"
+                if other.id not in fact.conflicts_with:
+                    fact.conflicts_with.append(other.id)
+                if fact.id not in other.conflicts_with:
+                    other.conflicts_with.append(fact.id)
+                self._persist_fact(other)
+
+    def _project_semantics(self, fact: Fact, candidate: ExtractionCandidate) -> None:
+        """Переносит извлечённые сущности и связи онтологии из payload в Neo4j."""
+        if not self.graph_sink:
+            return
+        entities = [
+            {"type": item.get("type"), "name": self.normalizer.normalize_entity(str(item.get("name", ""))) or ""}
+            for item in candidate.payload.get("entities", [])
+            if isinstance(item, dict)
+        ]
+        relations = [
+            {
+                "subject": self.normalizer.normalize_entity(str(item.get("subject", ""))) or "",
+                "predicate": item.get("predicate"),
+                "object": self.normalizer.normalize_entity(str(item.get("object", ""))) or "",
+            }
+            for item in candidate.payload.get("relations", [])
+            if isinstance(item, dict)
+        ]
+        if entities or relations:
+            self.graph_sink.upsert_semantics(fact.id, entities, relations)
 
     def reject_candidate(self, candidate_id: str, note: str | None = None) -> ExtractionCandidate:
         candidate = self.candidates[candidate_id]
@@ -195,14 +266,20 @@ class ApplicationStore:
             self.postgres_sink.upsert_vectors(new_vectors, self.embedder.name)
 
     def search(self, query: str, top_k: int = 8) -> list[SearchHit]:
+        if not self.postgres_sink or not self.postgres_sink.enabled:
+            raise RuntimeError("Семантический поиск требует PostgreSQL (pgvector).")
         # Для запросов используется query-режим модели, если провайдер его поддерживает
         embed_query = getattr(self.embedder, "embed_query", self.embedder.embed)
         query_vector = embed_query([query])[0]
-        hits: list[SearchHit] = []
+        # Близость считает pgvector; кандидатов берём с запасом,
+        # финальный порядок определяет гибридный скоринг с лексической добавкой
+        candidates = self.postgres_sink.search_vectors(query_vector, top_k * 3)
         query_terms = set(query.lower().replace("ё", "е").split())
-        for fragment_id, vector in self.fragment_vectors.items():
-            fragment = self.fragments[fragment_id]
-            semantic = _cosine(query_vector, vector)
+        hits: list[SearchHit] = []
+        for fragment_id, semantic in candidates:
+            fragment = self.fragments.get(fragment_id)
+            if fragment is None:
+                continue
             lexical = sum(1 for term in query_terms if term and term in fragment.normalized_text) / max(len(query_terms), 1)
             score = semantic * 0.72 + lexical * 0.28
             if score <= 0:

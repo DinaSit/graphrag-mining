@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 
+import httpx
 import yaml
 
 try:
@@ -12,8 +14,8 @@ except ImportError as exc:  # pragma: no cover - helps local smoke tests without
     raise RuntimeError("Install backend dependencies from backend/requirements.txt to run the API.") from exc
 
 from app.file_storage import MinioFileStorage
+from app.jobs import IngestQueue
 from app.persistence import Neo4jSink, PostgresSink
-from app.pipeline.sample_data import seed_sample_data
 from app.pipeline.query import QueryOrchestrator
 from app.schemas import CandidateStatus, QueryRequest, SearchRequest
 from app.storage import ApplicationStore
@@ -36,8 +38,13 @@ store = ApplicationStore(
     ),
     extraction_service_url=os.getenv("EXTRACTION_SERVICE_URL"),
 )
-seed_sample_data(store, SAMPLE_PDF_DIR if SAMPLE_PDF_DIR.exists() else ROOT_DIR)
+store.hydrate_from_postgres()
 orchestrator = QueryOrchestrator(store)
+
+# Фоновая обработка загрузок: 2 воркера по умолчанию (лимит LLM-вызовов
+# держит сервис извлечения). INGEST_WORKERS=0 возвращает синхронный режим.
+_workers = int(os.getenv("INGEST_WORKERS", "2"))
+ingest_queue = IngestQueue(store, workers=_workers) if _workers > 0 else None
 
 
 def _load_ontology_payload() -> dict[str, str]:
@@ -78,7 +85,19 @@ def health() -> dict[str, str]:
 
 @app.post("/ask")
 def ask(request: QueryRequest):
-    return orchestrator.answer(request)
+    response = orchestrator.answer(request)
+    # Ступень веб-поиска: в базе знаний ничего не нашлось — ищем во внешних
+    # источниках (разрешённый список доменов). Внешний ответ не верифицируется
+    # и в граф не попадает.
+    web_answer_url = os.getenv("WEB_ANSWER_URL")
+    if web_answer_url and not response.experiments:
+        try:
+            web = httpx.post(web_answer_url, json={"question": request.question}, timeout=90).json()
+            if web.get("found"):
+                response.web_answer = {"answer": web.get("answer"), "url": web.get("url")}
+        except Exception:
+            pass  # веб-поиск опционален: его недоступность не ломает ответ из базы
+    return response
 
 
 @app.post("/ingest")
@@ -89,8 +108,24 @@ async def ingest(
     access_level: str = Form(default="uploaded"),
 ):
     content = await file.read()
-    document = store.ingest_document(file.filename or "uploaded.txt", content, document_type, source_label, access_level)
-    return {"document": document, "status": document.status, "evidence_units": document.element_count}
+    filename = file.filename or "uploaded.txt"
+    # Дубль определяется сразу, без постановки в очередь
+    existing = store.find_document_by_checksum(hashlib.sha256(content).hexdigest())
+    if existing:
+        return {"document": existing, "status": existing.status, "evidence_units": existing.element_count}
+    if ingest_queue is None:  # синхронный режим (INGEST_WORKERS=0)
+        document = store.ingest_document(filename, content, document_type, source_label, access_level)
+        return {"document": document, "status": document.status, "evidence_units": document.element_count}
+    job_id = ingest_queue.enqueue_ingest(filename, content, document_type, source_label, access_level)
+    return {"job_id": job_id, "filename": filename, "status": "queued"}
+
+
+@app.get("/jobs/{job_id}")
+def job_status(job_id: str):
+    job = store.postgres_sink.get_job(job_id) if store.postgres_sink else None
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job
 
 
 @app.get("/graph")
@@ -142,11 +177,14 @@ def reprocess_document(document_id: str):
     document = store.documents.get(document_id)
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
-    fragments = [fragment for fragment in store.fragments.values() if fragment.document_id == document_id]
-    candidates = store.llm.extract_entities(fragments)
-    for candidate in candidates:
-        store.add_candidate(candidate)
-    return {"document_id": document_id, "status": "completed", "candidates": len(candidates)}
+    if ingest_queue is None:  # синхронный режим (INGEST_WORKERS=0)
+        fragments = [fragment for fragment in store.fragments.values() if fragment.document_id == document_id]
+        candidates = store.llm.extract_entities(fragments)
+        for candidate in candidates:
+            store.add_candidate(candidate)
+        return {"document_id": document_id, "status": "completed", "candidates": len(candidates)}
+    job_id = ingest_queue.enqueue_reprocess(document_id)
+    return {"document_id": document_id, "job_id": job_id, "status": "queued"}
 
 
 @app.post("/search")

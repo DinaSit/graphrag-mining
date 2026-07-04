@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import csv
 import io
 import re
@@ -12,6 +13,11 @@ try:
     import pdfplumber
 except ImportError:  # pragma: no cover
     pdfplumber = None
+
+try:
+    import fitz  # PyMuPDF: рендер страниц без текстового слоя для мультимодального извлечения
+except ImportError:  # pragma: no cover
+    fitz = None
 
 try:
     from docx import Document as DocxDocument
@@ -186,13 +192,34 @@ class PdfParser:
                 document_id, version_id, filename, content
             )
         fragments: list[SourceFragment] = []
+        render_doc = None
         with pdfplumber.open(io.BytesIO(content)) as pdf:
             for page_index, page in enumerate(pdf.pages, start=1):
                 text = (page.extract_text() or "").strip()
+                image_b64 = None
                 if not text:
+                    # Страница без текстового слоя (скан/схема): рендерим в PNG,
+                    # извлечение отработает мультимодально по изображению
+                    if fitz is not None:
+                        if render_doc is None:
+                            render_doc = fitz.open(stream=content, filetype="pdf")
+                        try:
+                            pixmap = render_doc[page_index - 1].get_pixmap(dpi=120)
+                            image_b64 = base64.b64encode(pixmap.tobytes("png")).decode("ascii")
+                        except Exception:
+                            image_b64 = None
                     text = f"PDF page {page_index} has no text layer; visual OCR adapter is required."
                 blocks = split_text_blocks(text) or [text]
                 for block_index, block in enumerate(blocks, start=1):
+                    metadata = {
+                        "filename": filename,
+                        "page": page_index,
+                        "block": block_index,
+                        "evidence_unit": True,
+                        "parser": self.name,
+                    }
+                    if image_b64 and block_index == 1:
+                        metadata["image_b64"] = image_b64
                     fragments.append(
                         SourceFragment(
                             id=f"fragment-{document_id}-p{page_index}-{block_index}",
@@ -203,15 +230,11 @@ class PdfParser:
                             section="PDF evidence unit",
                             text=block,
                             normalized_text=normalize_text(block),
-                            metadata={
-                                "filename": filename,
-                                "page": page_index,
-                                "block": block_index,
-                                "evidence_unit": True,
-                                "parser": self.name,
-                            },
+                            metadata=metadata,
                         )
                     )
+        if render_doc is not None:
+            render_doc.close()
         return fragments
 
 

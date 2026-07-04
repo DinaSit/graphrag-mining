@@ -101,6 +101,9 @@ class Fact(BaseModel):
     confidence: float
     status: str = "approved"
     is_hypothesis: bool = False
+    # id фактов с противоположным эффектом по тому же материалу и свойству;
+    # оба факта сохраняются, статус conflicting помечает зону разногласий
+    conflicts_with: list[str] = Field(default_factory=list)
     source: SourceRef
 
 
@@ -159,6 +162,9 @@ class QueryResponse(BaseModel):
     contradictions: list[str]
     gaps: list[str]
     confidence: float
+    # Ответ из внешних источников, когда в базе знаний данных нет.
+    # Не верифицирован и в граф не записывается: {"answer": str, "url": str}
+    web_answer: dict[str, Any] | None = None
 
 
 class SearchRequest(BaseModel):
