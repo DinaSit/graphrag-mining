@@ -165,6 +165,7 @@ class QueryResponse(BaseModel):
     # Ответ из внешних источников, когда в базе знаний данных нет.
     # Не верифицирован и в граф не записывается: {"answer": str, "url": str}
     web_answer: dict[str, Any] | None = None
+    hypotheses: list[str] = Field(default_factory=list)
 
 
 class SearchRequest(BaseModel):
@@ -185,6 +186,18 @@ class SearchResponse(BaseModel):
     hits: list[SearchHit]
 
 
+class QueryCondition(BaseModel):
+    parameter: str
+    value_min: float | None = None
+    value_max: float | None = None
+    unit: str | None = None
+
+
+class QueryEntity(BaseModel):
+    type: str
+    name: str
+
+
 class ParsedQuestion(BaseModel):
     intent: str = "compare_experiments"
     material: str | None = None
@@ -192,6 +205,14 @@ class ParsedQuestion(BaseModel):
     temperature_min: float | None = None
     temperature_max: float | None = None
     unit: str = "C"
+    process: str | None = None
+    equipment: str | None = None
+    region: str | None = None
+    year_from: int | None = None
+    entities: list[QueryEntity] = Field(default_factory=list)
+    conditions: list[QueryCondition] = Field(default_factory=list)
+    target: QueryCondition | None = None
+    keywords: list[str] = Field(default_factory=list)
 
 
 class OntologyCandidate(BaseModel):

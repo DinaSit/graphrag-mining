@@ -673,6 +673,19 @@ class Neo4jSink:
         except Exception as exc:  # pragma: no cover - integration-only path
             self.last_error = str(exc)
         return GraphPayload(nodes=list(nodes.values()), edges=list(edges.values()))
+    
+    def run_read(self, query: str, params: dict) -> list[dict]:
+        if not self.enabled:
+            return []
+        rows: list[dict] = []
+        try:
+            with GraphDatabase.driver(self.uri, auth=(self.user, self.password)) as driver:
+                with driver.session() as session:
+                    for record in session.run(query, **params):
+                        rows.append(dict(record))
+        except Exception as exc:  # pragma: no cover - integration-only path
+            self.last_error = str(exc)
+        return rows
 
     def _write(self, query: str, params: dict[str, Any]) -> None:
         try:

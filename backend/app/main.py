@@ -84,8 +84,8 @@ def health() -> dict[str, str]:
 
 
 @app.post("/ask")
-def ask(request: QueryRequest):
-    response = orchestrator.answer(request)
+async def ask(request: QueryRequest):
+    response = await orchestrator.answer(request)
     # Ступень веб-поиска: в базе знаний ничего не нашлось — ищем во внешних
     # источниках (разрешённый список доменов). Внешний ответ не верифицируется
     # и в граф не попадает.
@@ -202,8 +202,8 @@ def search(request: SearchRequest):
 
 
 @app.post("/query")
-def query(request: QueryRequest):
-    return orchestrator.answer(request)
+async def query(request: QueryRequest):
+    return await orchestrator.answer(request)
 
 
 @app.get("/entities/{entity_id}")
