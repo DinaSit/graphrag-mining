@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import math
 import os
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -81,17 +82,67 @@ class ApplicationStore:
         self.candidates.update(state["candidates"])
         self.facts.update(state["facts"])
         self.fragment_vectors.update(state["vectors"])
-        # Фрагменты без векторов (например, после смены модели эмбеддингов) индексируются заново
+        # Фрагменты без векторов (например, после смены модели эмбеддингов)
+        # индексируются заново в фоне: старт backend не блокируется
         missing = [fragment for fid, fragment in self.fragments.items() if fid not in self.fragment_vectors]
         if missing:
-            try:
-                self.index_fragments(missing)
-            except Exception as exc:
-                print(f"hydrate: переиндексация {len(missing)} фрагментов не удалась: {exc}")
+            threading.Thread(target=self._reindex_missing, args=(missing,), daemon=True, name="reindex-missing").start()
+
+    def _reindex_missing(self, fragments: list[SourceFragment]) -> None:
+        try:
+            self.index_fragments(fragments)
+            print(f"hydrate: переиндексировано {len(fragments)} фрагментов")
+        except Exception as exc:
+            print(f"hydrate: переиндексация {len(fragments)} фрагментов не удалась: {exc}")
 
     def add_source_fragment(self, fragment: SourceFragment) -> None:
         self.fragments[fragment.id] = fragment
         self._persist_fragments([fragment])
+
+    def delete_document(self, document_id: str) -> dict:
+        """Удаляет документ со всем, что из него извлечено: фрагменты, кандидаты,
+        факты, узлы графа. Общие сущности остаются, если на них ссылаются другие
+        документы; осиротевшие вершины вычищаются.
+        """
+        document = self.documents.get(document_id)
+        if document is None:
+            raise KeyError(document_id)
+
+        fragment_ids = [fid for fid, f in list(self.fragments.items()) if f.document_id == document_id]
+        fact_ids = [fid for fid, f in list(self.facts.items()) if f.source.document_id == document_id]
+        candidate_ids = [
+            cid for cid, c in list(self.candidates.items())
+            if c.source is not None and c.source.document_id == document_id
+        ]
+
+        for fid in fragment_ids:
+            self.fragments.pop(fid, None)
+            self.fragment_vectors.pop(fid, None)
+        for cid in candidate_ids:
+            self.candidates.pop(cid, None)
+        for fid in fact_ids:
+            self.facts.pop(fid, None)
+        self.versions.pop(document.current_version_id, None)
+        self.documents.pop(document_id, None)
+
+        # Снять пометку спора у оппонентов удалённых фактов
+        removed = set(fact_ids)
+        for fact in list(self.facts.values()):
+            if removed & set(fact.conflicts_with):
+                fact.conflicts_with = [fid for fid in fact.conflicts_with if fid not in removed]
+                if not fact.conflicts_with and fact.status == "conflicting":
+                    fact.status = "approved"
+                self._persist_fact(fact)
+
+        if self.postgres_sink:
+            self.postgres_sink.delete_document_data(document_id)
+        if self.graph_sink:
+            self.graph_sink.delete_document(document_id, fact_ids)
+        if self.file_storage:
+            self.file_storage.delete_document(document_id)
+
+        return {"document_id": document_id, "fragments": len(fragment_ids),
+                "candidates": len(candidate_ids), "facts": len(fact_ids)}
 
     def find_document_by_checksum(self, checksum: str) -> DocumentRecord | None:
         duplicate = next((doc for doc in list(self.documents.values()) if doc.checksum == checksum), None)
@@ -257,13 +308,17 @@ class ApplicationStore:
         return candidate
 
     def index_fragments(self, fragments: list[SourceFragment]) -> None:
-        vectors = self.embedder.embed([fragment.normalized_text for fragment in fragments])
-        new_vectors: dict[str, list[float]] = {}
-        for fragment, vector in zip(fragments, vectors):
-            self.fragment_vectors[fragment.id] = vector
-            new_vectors[fragment.id] = vector
-        if self.postgres_sink:
-            self.postgres_sink.upsert_vectors(new_vectors, self.embedder.name)
+        # Пачками: большой документ не влезает в таймаут одного запроса,
+        # а результат фиксируется по мере готовности, а не в конце
+        for start in range(0, len(fragments), 64):
+            chunk = fragments[start : start + 64]
+            vectors = self.embedder.embed([fragment.normalized_text for fragment in chunk])
+            new_vectors: dict[str, list[float]] = {}
+            for fragment, vector in zip(chunk, vectors):
+                self.fragment_vectors[fragment.id] = vector
+                new_vectors[fragment.id] = vector
+            if self.postgres_sink:
+                self.postgres_sink.upsert_vectors(new_vectors, self.embedder.name)
 
     def search(self, query: str, top_k: int = 8) -> list[SearchHit]:
         if not self.postgres_sink or not self.postgres_sink.enabled:

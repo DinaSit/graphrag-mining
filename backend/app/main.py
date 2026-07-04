@@ -172,6 +172,15 @@ def get_document_status(document_id: str):
     return {"document_id": document.id, "status": document.status, "element_count": document.element_count}
 
 
+@app.delete("/documents/{document_id}")
+def delete_document(document_id: str):
+    """Удаляет документ и всё извлечённое из него (фрагменты, факты, узлы графа)."""
+    try:
+        return store.delete_document(document_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+
 @app.post("/documents/{document_id}/reprocess")
 def reprocess_document(document_id: str):
     document = store.documents.get(document_id)

@@ -270,7 +270,8 @@ class DocxParser:
                         id=f"fragment-{document_id}-docx-p{paragraph_index}",
                         document_id=document_id,
                         version_id=version_id,
-                        page=1,
+                        # У DOCX нет страниц: адрес фрагмента — сквозной номер блока
+                        page=paragraph_index,
                         element_type="docx_paragraph",
                         section=section,
                         text=block,
@@ -298,7 +299,7 @@ class DocxParser:
                         id=f"fragment-{document_id}-docx-t{table_index}-r{row_index}",
                         document_id=document_id,
                         version_id=version_id,
-                        page=1,
+                        page=table_row_index,
                         element_type="docx_table_row",
                         section=f"DOCX table {table_index}",
                         text=row_text,

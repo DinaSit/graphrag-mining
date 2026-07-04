@@ -316,6 +316,21 @@ class PostgresSink:
             self.last_error = str(exc)
             return []
 
+    def delete_document_data(self, document_id: str) -> None:
+        """Каскадное удаление всего, что связано с документом (порядок — по FK)."""
+        if not self.enabled:
+            return
+        statements = [
+            "DELETE FROM fragment_vectors WHERE fragment_id IN (SELECT id FROM source_fragments WHERE document_id = %s)",
+            "DELETE FROM extraction_candidates WHERE source->>'document_id' = %s",
+            "DELETE FROM facts WHERE source->>'document_id' = %s",
+            "DELETE FROM source_fragments WHERE document_id = %s",
+            "DELETE FROM document_versions WHERE document_id = %s",
+            "DELETE FROM documents WHERE id = %s",
+        ]
+        for statement in statements:
+            self._execute(statement, (document_id,))
+
     def upsert_job(self, job_id: str, job_type: str, status: str, payload: dict, error: str | None = None) -> None:
         if not self.enabled:
             return
@@ -617,6 +632,18 @@ class Neo4jSink:
                     "object_id": f"{object_label.lower()}-{_slug(obj)}",
                 },
             )
+
+    def delete_document(self, document_id: str, claim_ids: list[str]) -> None:
+        """Удаляет из графа узлы документа и осиротевшие вершины."""
+        if not self.enabled:
+            return
+        self._write("MATCH (s:SourceFragment {document_id: $document_id}) DETACH DELETE s",
+                    {"document_id": document_id})
+        self._write("MATCH (c:Claim) WHERE c.id IN $claim_ids DETACH DELETE c",
+                    {"claim_ids": claim_ids})
+        # Эксперименты без единого утверждения и вершины без связей — сироты
+        self._write("MATCH (e:Experiment) WHERE NOT (e)<-[:BASED_ON]-() DETACH DELETE e", {})
+        self._write("MATCH (n) WHERE NOT (n)--() DELETE n", {})
 
     def get_graph(self, limit: int = 80) -> GraphPayload:
         if not self.enabled:

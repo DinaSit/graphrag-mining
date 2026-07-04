@@ -66,6 +66,18 @@ class MinioFileStorage:
             self.last_error = str(exc)
             return None
 
+    def delete_document(self, document_id: str) -> None:
+        if not self.enabled:
+            return
+        try:
+            client = self._get_client()
+            assert self.bucket is not None
+            prefix = f"documents/{document_id}/"
+            for obj in list(client.list_objects(self.bucket, prefix=prefix, recursive=True)):
+                client.remove_object(self.bucket, obj.object_name)
+        except Exception as exc:  # pragma: no cover - integration-only path
+            self.last_error = str(exc)
+
     def _get_client(self):
         if self._client is None:
             self._client = Minio(
