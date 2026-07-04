@@ -122,6 +122,12 @@ def api_post_empty(path: str) -> Any:
     return response.json()
 
 
+def api_delete(path: str) -> Any:
+    response = requests.delete(f"{BACKEND_URL}{path}", timeout=120)
+    response.raise_for_status()
+    return response.json()
+
+
 def upload_file(file) -> Any:
     files = {"file": (file.name, file.getvalue(), file.type or "application/octet-stream")}
     data = {"document_type": file.name.split(".")[-1], "source_label": file.name, "access_level": "uploaded"}
@@ -159,9 +165,53 @@ def _escape(value: str) -> str:
     return str(value).replace("\\", "\\\\").replace('"', '\\"')[:120]
 
 
+TYPE_LABELS = {
+    "Claim": "Утверждение",
+    "Entity": "Сущность",
+    "Relation": "Связь",
+}
+
+
 def _status_label(value: Any) -> str:
     raw = value.value if hasattr(value, "value") else str(value)
     return STATUS_LABELS.get(raw, raw)
+
+
+@st.cache_data(ttl=30)
+def _document_names() -> dict[str, str]:
+    """id документа → имя файла; для человекочитаемых источников."""
+    try:
+        return {doc["id"]: doc["filename"] for doc in api_get("/documents")}
+    except Exception:
+        return {}
+
+
+def _source_name(document_id: str | None) -> str:
+    if not document_id:
+        return "?"
+    return _document_names().get(document_id, document_id)
+
+
+def _place_label(source: dict[str, Any]) -> str:
+    """Человекочитаемый адрес фрагмента: у PDF — страница, у PPTX — слайд,
+    у DOCX/таблиц страниц нет — сквозной номер блока."""
+    section = source.get("section") or ""
+    page = source.get("page")
+    if not page:
+        return ""
+    if section.startswith("PDF"):
+        return f"Страница: {page}"
+    if section.startswith("PPTX"):
+        return f"Слайд: {page}"
+    return f"Блок: {page}"
+
+
+def _place_section(source: dict[str, Any]) -> str:
+    """Раздел документа, если парсер его распознал (заголовок главы в DOCX)."""
+    section = source.get("section") or ""
+    if section and not section.startswith(("PDF", "PPTX", "DOCX", "XLSX", "CSV")):
+        return section
+    return ""
 
 
 def _pill(label: str, value: Any) -> str:
@@ -239,11 +289,9 @@ def _experiments_frame(experiments: list[dict[str, Any]]) -> pd.DataFrame:
 def _sources_frame(sources: list[dict[str, Any]]) -> pd.DataFrame:
     rows = [
         {
-            "Документ": source.get("document_id"),
-            "Версия": source.get("version_id"),
-            "Фрагмент": source.get("fragment_id"),
-            "Страница": source.get("page"),
-            "Секция": source.get("section"),
+            "Файл": _source_name(source.get("document_id")),
+            "Место": _place_label(source),
+            "Раздел": _place_section(source),
             "Цитата": source.get("quote"),
         }
         for source in sources
@@ -262,7 +310,7 @@ def _facts_frame(facts: list[dict[str, Any]]) -> pd.DataFrame:
         for opponent_id in fact.get("conflicts_with") or []:
             opponent = by_id.get(opponent_id)
             if opponent:
-                document = (opponent.get("source") or {}).get("document_id", "?")
+                document = _source_name((opponent.get("source") or {}).get("document_id"))
                 parts.append(f"{opponent.get('material')} · {opponent.get('property')} ({document})")
             else:
                 parts.append(opponent_id)
@@ -464,6 +512,19 @@ with tab_documents:
             st.info("Документы не найдены.")
         else:
             st.dataframe(frame, use_container_width=True, hide_index=True)
+            st.markdown("#### Удаление документа")
+            st.caption("Документ хранится, пока его не удалить здесь. Удаляется всё извлечённое: "
+                       "фрагменты, факты, узлы графа; общие сущности остаются, если на них "
+                       "ссылаются другие документы.")
+            names = {f"{doc['filename']} ({doc['id']})": doc["id"] for doc in documents}
+            selected = st.selectbox("Документ", list(names), key="delete-doc-select")
+            confirm = st.checkbox("Подтверждаю удаление со всеми связями", key="delete-doc-confirm")
+            if st.button("Удалить", type="primary", disabled=not confirm, key="delete-doc-btn"):
+                result = api_delete(f"/documents/{names[selected]}")
+                st.success(f"Удалено: фрагментов {result['fragments']}, "
+                           f"кандидатов {result['candidates']}, фактов {result['facts']}")
+                _document_names.clear()
+                st.rerun()
     except Exception as exc:
         st.warning(f"Не удалось загрузить /documents: {exc}")
 
@@ -505,9 +566,14 @@ with tab_review:
                     st.json(payload, expanded=False)
                 with right:
                     st.metric("Confidence", f"{float(candidate.get('confidence') or 0):.0%}")
-                    st.write(f"Тип: `{candidate.get('type')}`")
-                    st.write(f"Источник: `{source.get('document_id')}`")
-                    st.write(f"Фрагмент: `{source.get('fragment_id')}`")
+                    st.write(f"Тип: {TYPE_LABELS.get(candidate.get('type'), candidate.get('type'))}")
+                    st.write(f"Файл: {_source_name(source.get('document_id'))}")
+                    place = _place_label(source)
+                    if place:
+                        st.write(place)
+                    section = _place_section(source)
+                    if section:
+                        st.write(f"Раздел: {section}")
                     if candidate.get("status") == "pending_review":
                         approve_col, reject_col = st.columns(2)
                         with approve_col:

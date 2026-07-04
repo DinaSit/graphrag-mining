@@ -44,7 +44,9 @@ async def _post(path: str, body: dict, timeout: float) -> dict:
                 last_error = YandexClientError(f"HTTP {resp.status_code}: {resp.text[:300]}")
                 await asyncio.sleep(min(2 ** attempt, 30))
                 continue
-            resp.raise_for_status()
+            if resp.status_code >= 400:
+                # 4xx не ретраится: ключ отозван (403), модель не найдена (404), кривой запрос (400)
+                raise YandexClientError(f"Yandex API отказал: HTTP {resp.status_code}: {resp.text[:300]}")
             return resp.json()
         except (httpx.TimeoutException, httpx.TransportError) as e:
             last_error = e
@@ -64,7 +66,10 @@ async def chat(messages: list[dict], temperature: float = 0.0, model: str | None
             },
             timeout=config.LLM_TIMEOUT,
         )
-    return data["choices"][0]["message"]["content"]
+    content = data["choices"][0]["message"]["content"]
+    if content is None:  # модель может вернуть пустой ответ (обрезка, фильтр)
+        raise YandexClientError("Модель вернула пустой ответ")
+    return content
 
 
 def parse_json_answer(raw: str) -> dict:
