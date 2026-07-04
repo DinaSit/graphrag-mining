@@ -13,7 +13,7 @@ YANDEX_EMB_QUERY_MODEL = os.environ.get("YANDEX_EMB_QUERY_MODEL", "text-embeddin
 
 LLM_TIMEOUT = float(os.environ.get("LLM_TIMEOUT", "120"))
 LLM_CONCURRENCY = int(os.environ.get("LLM_CONCURRENCY", "2"))
-LLM_RETRIES = int(os.environ.get("LLM_RETRIES", "3"))
+LLM_RETRIES = int(os.environ.get("LLM_RETRIES", "6"))
 
 # domain/default монтируется в контейнер (см. docker-compose.override.yml)
 DOMAIN_DIR = Path(os.environ.get("DOMAIN_DIR", str(Path(__file__).resolve().parents[2] / "domain" / "default")))

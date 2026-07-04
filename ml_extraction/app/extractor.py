@@ -1,6 +1,7 @@
 """Оркестрация извлечения: фрагменты → LLM → кандидаты фактов. Зона ML-A."""
 import asyncio
 import logging
+import re
 
 from app import config, prompt, yandex_client
 from app.schemas import ExtractionCandidate, SourceFragment, SourceRef
@@ -13,13 +14,9 @@ _EFFECT_DIRECTIONS = {"increase", "decrease", "neutral", "unknown"}
 
 
 async def extract_fragments(fragments: list[SourceFragment]) -> list[ExtractionCandidate]:
-    sem = asyncio.Semaphore(config.LLM_CONCURRENCY)
-
-    async def one(fragment: SourceFragment) -> list[ExtractionCandidate]:
-        async with sem:
-            return await _extract_one(fragment)
-
-    results = await asyncio.gather(*(one(f) for f in fragments), return_exceptions=True)
+    # Параллельность ограничивает глобальный семафор в yandex_client:
+    # суммарный лимит держится и при нескольких одновременных батчах
+    results = await asyncio.gather(*(_extract_one(f) for f in fragments), return_exceptions=True)
     candidates: list[ExtractionCandidate] = []
     for fragment, result in zip(fragments, results):
         if isinstance(result, Exception):
@@ -30,15 +27,50 @@ async def extract_fragments(fragments: list[SourceFragment]) -> list[ExtractionC
     return candidates
 
 
+_DIGIT_RE = re.compile(r"\d")
+
+
+def _route(fragment: SourceFragment, text: str, image_b64: str | None) -> str:
+    """Пред-фильтр-маршрутизатор (из итогового плана): каким разбором обрабатывать фрагмент.
+
+    vision — сканы и схемы; full — таблицы и текст с числами (нужны числовые правила
+    и словарь терминов); light — простой текст, промпт короче в ~4 раза.
+    """
+    if image_b64:
+        return "vision"
+    if "table" in fragment.element_type or "row" in fragment.element_type:
+        return "full"
+    if _DIGIT_RE.search(text):
+        return "full"
+    return "light"
+
+
 async def _extract_one(fragment: SourceFragment) -> list[ExtractionCandidate]:
     text = (fragment.text or "").strip()
-    if len(text) < config.MIN_FRAGMENT_CHARS:
-        return []  # фрагменты короче порога в модель не отправляются
+    image_b64 = fragment.metadata.get("image_b64")
+    route = _route(fragment, text, image_b64)
 
-    messages = [{
-        "role": "user",
-        "content": prompt.build_prompt(text[:8000], fragment.element_type, fragment.page),
-    }]
+    if route == "vision":
+        # Страница без текстового слоя: извлечение по изображению
+        prompt_text = prompt.build_prompt(
+            "(текстовый слой отсутствует — извлекай данные с приложенного изображения страницы)",
+            fragment.element_type,
+            fragment.page,
+        )
+        messages = [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt_text},
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}},
+            ],
+        }]
+    else:
+        if len(text) < config.MIN_FRAGMENT_CHARS:
+            return []  # фрагменты короче порога в модель не отправляются
+        messages = [{
+            "role": "user",
+            "content": prompt.build_prompt(text[:8000], fragment.element_type, fragment.page, mode=route),
+        }]
     data = await yandex_client.chat_json(messages)
 
     candidates = []

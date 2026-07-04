@@ -21,9 +21,34 @@ STATUS_LABELS = {
     "pending_review": "На проверке",
     "approved": "Утверждено",
     "rejected": "Отклонено",
+    "conflicting": "⚠️ спорный",
+    "queued": "В очереди",
     "completed": "Готово",
     "processing": "В обработке",
     "failed": "Ошибка",
+}
+EDGE_LABELS = {
+    "ABOUT": "о материале",
+    "BASED_ON": "на основании",
+    "MEASURES": "измеряет",
+    "PRODUCED": "дал эффект",
+    "SUPPORTS": "подтверждает",
+    "CONDUCTED_BY": "кто проводил",
+    "MENTIONS": "упоминает",
+    "applies_to": "применяется к",
+    "uses_material": "использует материал",
+    "operates_at_condition": "при условии",
+    "measured_parameter": "измерял параметр",
+    "produced_effect": "дал эффект",
+    "validated_by": "подтверждён",
+    "contradicts": "противоречит",
+    "authored_by": "автор",
+    "expert_in": "эксперт в",
+    "applied_in": "применялось в",
+    "worked_on": "работал над",
+    "described_in": "описан в",
+    "researched": "исследовала",
+    "validated": "подтвердила",
 }
 
 
@@ -120,7 +145,8 @@ def graph_to_dot(graph: dict[str, Any]) -> str:
         label = f"{node.get('type', 'Entity')}: {node.get('label', node.get('id'))}"
         lines.append(f'{node_id} [label="{_escape(label)}"];')
     for edge in edges[:120]:
-        lines.append(f'{_dot_id(edge["source"])} -> {_dot_id(edge["target"])} [label="{_escape(edge.get("label", ""))}"];')
+        label = EDGE_LABELS.get(edge.get("label", ""), edge.get("label", ""))
+        lines.append(f'{_dot_id(edge["source"])} -> {_dot_id(edge["target"])} [label="{_escape(label)}"];')
     lines.append("}")
     return "\n".join(lines)
 
@@ -228,8 +254,23 @@ def _sources_frame(sources: list[dict[str, Any]]) -> pd.DataFrame:
 def _facts_frame(facts: list[dict[str, Any]]) -> pd.DataFrame:
     if not facts:
         return pd.DataFrame()
+    # Оппонент спорного факта: материал/свойство и документ-источник
+    by_id = {fact.get("id"): fact for fact in facts}
+
+    def _opponents(fact: dict[str, Any]) -> str:
+        parts = []
+        for opponent_id in fact.get("conflicts_with") or []:
+            opponent = by_id.get(opponent_id)
+            if opponent:
+                document = (opponent.get("source") or {}).get("document_id", "?")
+                parts.append(f"{opponent.get('material')} · {opponent.get('property')} ({document})")
+            else:
+                parts.append(opponent_id)
+        return "; ".join(parts)
+
     frame = pd.DataFrame(facts)
-    columns = ["id", "material", "property", "status", "confidence", "source"]
+    frame["Спорит с"] = [_opponents(fact) for fact in facts]
+    columns = ["id", "material", "property", "status", "Спорит с", "confidence", "source"]
     frame = frame[[column for column in columns if column in frame.columns]].copy()
     frame.rename(
         columns={
@@ -263,6 +304,14 @@ def render_answer(answer: dict[str, Any], include_hypotheses: bool) -> None:
             st.write(answer.get("summary") or "Ответ не сформирован.")
     with metric_col:
         st.metric("Confidence", f"{float(answer.get('confidence') or 0):.0%}")
+
+    web_answer = answer.get("web_answer") or {}
+    if web_answer.get("answer"):
+        with st.container(border=True):
+            st.markdown("**🌐 Ответ из внешних источников** · _не верифицировано, в базу знаний не записано_")
+            st.write(web_answer["answer"])
+            if web_answer.get("url"):
+                st.markdown(f"Источник: {web_answer['url']}")
 
     experiments = answer.get("experiments", [])
     sources = answer.get("sources", [])
@@ -425,7 +474,12 @@ with tab_review:
         "approved": "Утвержденные",
         "rejected": "Отклоненные",
     }
-    status_key = st.selectbox("Статус кандидатов", list(status_options), format_func=status_options.get)
+    status_key = st.selectbox(
+        "Статус кандидатов",
+        list(status_options),
+        index=list(status_options).index("pending_review"),
+        format_func=status_options.get,
+    )
     path = "/review/facts" if status_key == "all" else f"/review/facts?status={status_key}"
     try:
         candidates = api_get(path)
@@ -436,25 +490,34 @@ with tab_review:
 
         for candidate in candidates[:30]:
             source = candidate.get("source") or {}
-            title = f"{_status_label(candidate.get('status'))} · {candidate.get('id')} · {source.get('fragment_id', 'без источника')}"
+            payload = candidate.get("payload", {})
+            summary = " · ".join(
+                str(payload.get(key))
+                for key in ("material", "process", "property")
+                if payload.get(key) and payload.get(key) != "не указано"
+            )
+            title = f"{_status_label(candidate.get('status'))} · {summary or candidate.get('id')}"
             with st.expander(title):
                 left, right = st.columns([2, 1])
                 with left:
-                    st.json(candidate.get("payload", {}), expanded=False)
+                    if source.get("quote"):
+                        st.markdown(f"**Цитата из документа:**\n> {source['quote']}")
+                    st.json(payload, expanded=False)
                 with right:
                     st.metric("Confidence", f"{float(candidate.get('confidence') or 0):.0%}")
                     st.write(f"Тип: `{candidate.get('type')}`")
                     st.write(f"Источник: `{source.get('document_id')}`")
                     st.write(f"Фрагмент: `{source.get('fragment_id')}`")
-                    approve_col, reject_col = st.columns(2)
-                    with approve_col:
-                        if st.button("Approve", key=f"approve-{candidate.get('id')}", use_container_width=True):
-                            api_post_empty(f"/review/facts/{candidate.get('id')}/approve")
-                            st.rerun()
-                    with reject_col:
-                        if st.button("Reject", key=f"reject-{candidate.get('id')}", use_container_width=True):
-                            api_post_empty(f"/review/facts/{candidate.get('id')}/reject")
-                            st.rerun()
+                    if candidate.get("status") == "pending_review":
+                        approve_col, reject_col = st.columns(2)
+                        with approve_col:
+                            if st.button("Approve", key=f"approve-{candidate.get('id')}", use_container_width=True):
+                                api_post_empty(f"/review/facts/{candidate.get('id')}/approve")
+                                st.rerun()
+                        with reject_col:
+                            if st.button("Reject", key=f"reject-{candidate.get('id')}", use_container_width=True):
+                                api_post_empty(f"/review/facts/{candidate.get('id')}/reject")
+                                st.rerun()
     except Exception as exc:
         st.warning(f"Не удалось загрузить /review/facts: {exc}")
 

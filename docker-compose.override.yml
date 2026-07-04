@@ -19,6 +19,8 @@ services:
       YANDEX_FOLDER_ID: ${YANDEX_FOLDER_ID:-b1ggusvist6c2sia1dno}
       YANDEX_MODEL: ${YANDEX_MODEL:-qwen3.6-35b-a3b/latest}
       DOMAIN_DIR: /domain/default
+      # Квота чата держит 4 параллельных запроса (ретраи с паузами настроены)
+      LLM_CONCURRENCY: "4"
     volumes:
       - ./domain:/domain:ro
     ports:
@@ -45,6 +47,9 @@ services:
       # Семантический индекс: эмбеддинги Yandex v2 (256 изм.) через сервис ml-extraction.
       # Убрать переменную — backend вернётся на deterministic-hash (64).
       EMBEDDINGS_URL: http://ml-extraction:8002/embed
+      # Веб-поиск по внешним источникам, когда база знаний не дала ответа.
+      # Убрать переменную — ступень отключится.
+      WEB_ANSWER_URL: http://ml-extraction:8002/web_answer
     depends_on:
       ml-extraction:
         condition: service_healthy

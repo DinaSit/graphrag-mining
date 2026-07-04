@@ -12,28 +12,38 @@ import yaml
 
 from app import config
 
-_TEMPLATE_PATH = Path(__file__).parent / "prompts" / "extraction.md"
+_TEMPLATES = {
+    # Полный разбор: числа, таблицы, сканы — с числовыми правилами и словарём терминов
+    "full": Path(__file__).parent / "prompts" / "extraction.md",
+    # Облегчённый разбор: простой текст без чисел — короче в ~4 раза (пред-фильтр из плана)
+    "light": Path(__file__).parent / "prompts" / "extraction_light.md",
+}
 
 # Сколько канонических терминов каждого типа включать в промпт
 _TERMS_PER_TYPE = 40
 
 
 @lru_cache
-def _static_prompt() -> str:
-    template = _TEMPLATE_PATH.read_text(encoding="utf-8")
+def _static_prompt(mode: str = "full") -> str:
+    template = _TEMPLATES[mode].read_text(encoding="utf-8")
 
     ontology = yaml.safe_load((config.DOMAIN_DIR / "ontology.yaml").read_text(encoding="utf-8"))
 
-    entity_lines = []
-    for name, spec in ontology.get("entity_types", {}).items():
-        examples = ", ".join(map(str, (spec.get("examples") or [])[:3]))
-        entity_lines.append(f"- {name}: {spec.get('description', '')} Примеры: {examples}")
+    if mode == "light":
+        # Простому тексту хватает перечня имён — без описаний, примеров и словаря
+        entity_lines = [", ".join(ontology.get("entity_types", {}))]
+        relation_lines = [", ".join(ontology.get("relation_types", {}))]
+    else:
+        entity_lines = []
+        for name, spec in ontology.get("entity_types", {}).items():
+            examples = ", ".join(map(str, (spec.get("examples") or [])[:3]))
+            entity_lines.append(f"- {name}: {spec.get('description', '')} Примеры: {examples}")
 
-    relation_lines = []
-    for name, spec in ontology.get("relation_types", {}).items():
-        src = ", ".join(spec.get("source", []))
-        dst = ", ".join(spec.get("target", []))
-        relation_lines.append(f"- {name} ({src} → {dst}): {spec.get('description', '')}")
+        relation_lines = []
+        for name, spec in ontology.get("relation_types", {}).items():
+            src = ", ".join(spec.get("source", []))
+            dst = ", ".join(spec.get("target", []))
+            relation_lines.append(f"- {name} ({src} → {dst}): {spec.get('description', '')}")
 
     terms_by_type: dict[str, list[str]] = {}
     with (config.DOMAIN_DIR / "synonyms.csv").open(encoding="utf-8-sig") as f:
@@ -57,9 +67,9 @@ def _static_prompt() -> str:
     )
 
 
-def build_prompt(fragment_text: str, element_type: str, page: int) -> str:
+def build_prompt(fragment_text: str, element_type: str, page: int, mode: str = "full") -> str:
     return (
-        _static_prompt()
+        _static_prompt(mode)
         .replace("{element_type}", element_type)
         .replace("{page}", str(page))
         .replace("{fragment_text}", fragment_text)

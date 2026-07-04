@@ -51,6 +51,16 @@ class ExtractResponse(BaseModel):
     candidates: list[ExtractionCandidate]
 
 
+class WebAnswerRequest(BaseModel):
+    question: str
+
+
+class WebAnswerResponse(BaseModel):
+    found: bool
+    answer: str | None = None
+    url: str | None = None
+
+
 class EmbedRequest(BaseModel):
     texts: list[str]
     kind: str = Field(default="doc", description="doc — индексация фрагментов, query — поисковые запросы")

@@ -8,14 +8,30 @@ import logging
 
 from fastapi import FastAPI, HTTPException
 
-from app import config, yandex_client
+from app import config, web_search, yandex_client
 from app.extractor import extract_fragments
-from app.schemas import EmbedRequest, EmbedResponse, ExtractRequest, ExtractResponse
+from app.schemas import (
+    EmbedRequest,
+    EmbedResponse,
+    ExtractRequest,
+    ExtractResponse,
+    WebAnswerRequest,
+    WebAnswerResponse,
+)
 from app.yandex_client import YandexClientError
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
 app = FastAPI(title="ML Extraction Service (Yandex AI Studio)", version="0.1.0")
+
+
+@app.post("/web_answer", response_model=WebAnswerResponse)
+async def web_answer(request: WebAnswerRequest) -> WebAnswerResponse:
+    """Ответ из внешних источников (разрешённый список доменов). В граф не пишет."""
+    if not config.YANDEX_API_KEY:
+        raise HTTPException(status_code=503, detail="YANDEX_API_KEY не задан — сервис не сконфигурирован")
+    result = await web_search.answer_from_web(request.question)
+    return WebAnswerResponse(**result)
 
 
 @app.get("/health")

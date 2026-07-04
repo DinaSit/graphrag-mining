@@ -18,6 +18,11 @@ log = logging.getLogger(__name__)
 _RETRIABLE = {429, 500, 502, 503, 504}
 _FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
 
+# Лимиты параллельности глобальные на процесс: сколько бы клиентов ни звало
+# сервис одновременно, суммарная нагрузка на квоту Яндекса не растёт.
+_CHAT_SEMAPHORE = asyncio.Semaphore(int(config.LLM_CONCURRENCY))
+_EMBED_SEMAPHORE = asyncio.Semaphore(1)
+
 
 class YandexClientError(RuntimeError):
     pass
@@ -37,7 +42,7 @@ async def _post(path: str, body: dict, timeout: float) -> dict:
                 resp = await client.post(f"{config.YANDEX_BASE_URL}{path}", headers=_headers(), json=body)
             if resp.status_code in _RETRIABLE:
                 last_error = YandexClientError(f"HTTP {resp.status_code}: {resp.text[:300]}")
-                await asyncio.sleep(2 ** attempt)
+                await asyncio.sleep(min(2 ** attempt, 30))
                 continue
             resp.raise_for_status()
             return resp.json()
@@ -49,15 +54,16 @@ async def _post(path: str, body: dict, timeout: float) -> dict:
 
 async def chat(messages: list[dict], temperature: float = 0.0, model: str | None = None) -> str:
     """messages — формат OpenAI; content может быть списком блоков (text + image_url)."""
-    data = await _post(
-        "/chat/completions",
-        {
-            "model": config.model_uri(model or config.YANDEX_MODEL),
-            "messages": messages,
-            "temperature": temperature,
-        },
-        timeout=config.LLM_TIMEOUT,
-    )
+    async with _CHAT_SEMAPHORE:
+        data = await _post(
+            "/chat/completions",
+            {
+                "model": config.model_uri(model or config.YANDEX_MODEL),
+                "messages": messages,
+                "temperature": temperature,
+            },
+            timeout=config.LLM_TIMEOUT,
+        )
     return data["choices"][0]["message"]["content"]
 
 
@@ -91,12 +97,12 @@ async def embed(texts: list[str], kind: str = "doc") -> list[list[float]]:
     """
     model = config.YANDEX_EMB_DOC_MODEL if kind == "doc" else config.YANDEX_EMB_QUERY_MODEL
     uri = config.model_uri(model, scheme="emb")
-    sem = asyncio.Semaphore(4)
 
-    # API принимает одну строку за запрос; тексты отправляются параллельно
-    async def one(text: str) -> list[float]:
-        async with sem:
+    # API принимает одну строку за запрос; квота эмбеддингов по RPS ниже,
+    # чем у чата, — глобальный лимит держит отправку последовательной
+    out: list[list[float]] = []
+    for text in texts:
+        async with _EMBED_SEMAPHORE:
             data = await _post("/embeddings", {"model": uri, "input": text}, timeout=60)
-            return data["data"][0]["embedding"]
-
-    return list(await asyncio.gather(*(one(t) for t in texts)))
+        out.append(data["data"][0]["embedding"])
+    return out
