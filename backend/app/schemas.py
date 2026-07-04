@@ -162,9 +162,22 @@ class QueryResponse(BaseModel):
     contradictions: list[str]
     gaps: list[str]
     confidence: float
-    # Ответ из внешних источников, когда в базе знаний данных нет.
-    # Не верифицирован и в граф не записывается: {"answer": str, "url": str}
+    hypotheses: list[str] = Field(default_factory=list)
+    # Ответ из внешних источников, когда прямых фактов в базе нет.
+    # Не верифицирован и в граф не записывается:
+    # {"answer": str|None, "url": str, "snippets": [...], "llm_error": str|None}
     web_answer: dict[str, Any] | None = None
+    # Обе LLM недоступны: человекочитаемая причина; ответ собран без генерации
+    llm_error: str | None = None
+    # Семантический поиск bge-m3 — работает без LLM, показывается пользователю
+    search_hits: list[SearchHit] = Field(default_factory=list)
+    # Нашлись ли прямые факты (не гипотезы); False запускает ступень веб-поиска
+    has_direct_facts: bool = False
+    # Смежные факты: полезный контекст, но не прямой ответ на вопрос.
+    related_experiments: list[ExperimentRow] = Field(default_factory=list)
+    related_sources: list[SourceRef] = Field(default_factory=list)
+    related_graph: GraphPayload = Field(default_factory=GraphPayload)
+    evidence_status: str = "none"  # direct / partial / none
 
 
 class SearchRequest(BaseModel):
@@ -185,6 +198,18 @@ class SearchResponse(BaseModel):
     hits: list[SearchHit]
 
 
+class QueryCondition(BaseModel):
+    parameter: str
+    value_min: float | None = None
+    value_max: float | None = None
+    unit: str | None = None
+
+
+class QueryEntity(BaseModel):
+    type: str
+    name: str
+
+
 class ParsedQuestion(BaseModel):
     intent: str = "compare_experiments"
     material: str | None = None
@@ -192,6 +217,14 @@ class ParsedQuestion(BaseModel):
     temperature_min: float | None = None
     temperature_max: float | None = None
     unit: str = "C"
+    process: str | None = None
+    equipment: str | None = None
+    region: str | None = None
+    year_from: int | None = None
+    entities: list[QueryEntity] = Field(default_factory=list)
+    conditions: list[QueryCondition] = Field(default_factory=list)
+    target: QueryCondition | None = None
+    keywords: list[str] = Field(default_factory=list)
 
 
 class OntologyCandidate(BaseModel):
@@ -202,3 +235,7 @@ class OntologyCandidate(BaseModel):
     similar_existing_types: list[str] = Field(default_factory=list)
     confidence: float
     status: CandidateStatus = CandidateStatus.pending_review
+
+
+# SearchHit объявлен ниже QueryResponse: форвард-ссылка резолвится после определения
+QueryResponse.model_rebuild()

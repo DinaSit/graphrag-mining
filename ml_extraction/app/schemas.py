@@ -59,6 +59,10 @@ class WebAnswerResponse(BaseModel):
     found: bool
     answer: str | None = None
     url: str | None = None
+    # Сырые выдержки поисковой выдачи [{title, url, snippet}]: показываются всегда,
+    # а при отказе LLM (llm_error) заменяют связный ответ
+    snippets: list[dict[str, Any]] = Field(default_factory=list)
+    llm_error: str | None = None
 
 
 class EmbedRequest(BaseModel):

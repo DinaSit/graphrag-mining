@@ -191,7 +191,7 @@ class RemoteEmbeddingProvider:
 
     def __init__(self, embed_url: str):
         self.embed_url = embed_url
-        self.dimensions = int(os.environ.get("EMBEDDING_DIM", "256"))
+        self.dimensions = int(os.environ.get("EMBEDDING_DIM", "1024"))  # bge-m3
         self.timeout = float(os.environ.get("EMBEDDING_TIMEOUT", "120"))
 
     def embed(self, texts: list[str]) -> list[list[float]]:
@@ -240,9 +240,11 @@ class RemoteExtractionProvider:
             try:
                 with urllib.request.urlopen(request, timeout=self.timeout) as response:
                     data = json.loads(response.read().decode("utf-8"))
-            except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
-                candidates.extend(self.fallback.extract_entities(chunk))
-                continue
+            except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+                # Молчаливый откат на мок маскировал пустое извлечение под completed
+                # (документ «обработан», кандидатов ноль). Ошибка должна быть видимой:
+                # job помечается failed, документ остаётся необработанным.
+                raise RuntimeError(f"Сервис извлечения недоступен, инжест остановлен: {exc}") from exc
             candidates.extend(ExtractionCandidate.model_validate(item) for item in data.get("candidates", []))
         return candidates
 

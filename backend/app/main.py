@@ -17,7 +17,7 @@ from app.file_storage import MinioFileStorage
 from app.jobs import IngestQueue
 from app.persistence import Neo4jSink, PostgresSink
 from app.pipeline.query import QueryOrchestrator
-from app.schemas import CandidateStatus, QueryRequest, SearchRequest
+from app.schemas import CandidateStatus, DocumentStatus, ExtractionCandidate, QueryRequest, SearchRequest
 from app.storage import ApplicationStore
 
 
@@ -84,19 +84,28 @@ def health() -> dict[str, str]:
 
 
 @app.post("/ask")
-def ask(request: QueryRequest):
-    response = orchestrator.answer(request)
-    # Ступень веб-поиска: в базе знаний ничего не нашлось — ищем во внешних
-    # источниках (разрешённый список доменов). Внешний ответ не верифицируется
-    # и в граф не попадает.
+async def ask(request: QueryRequest):
+    response = await orchestrator.answer(request)
     web_answer_url = os.getenv("WEB_ANSWER_URL")
-    if web_answer_url and not response.experiments:
+    if web_answer_url and not response.has_direct_facts:
         try:
-            web = httpx.post(web_answer_url, json={"question": request.question}, timeout=90).json()
+            timeout = float(os.getenv("WEB_ANSWER_TIMEOUT", "20"))
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                web = (await client.post(web_answer_url, json={"question": request.question})).json()
             if web.get("found"):
-                response.web_answer = {"answer": web.get("answer"), "url": web.get("url")}
-        except Exception:
-            pass  # веб-поиск опционален: его недоступность не ломает ответ из базы
+                response.web_answer = {
+                    "answer": web.get("answer"),
+                    "url": web.get("url"),
+                    "snippets": web.get("snippets") or [],
+                    "llm_error": web.get("llm_error"),
+                }
+        except (httpx.TimeoutException, httpx.TransportError):
+            response.web_answer = {
+                "answer": None,
+                "url": None,
+                "snippets": [],
+                "llm_error": "веб-поиск не уложился во внутренний таймаут",
+            }
     return response
 
 
@@ -118,6 +127,17 @@ async def ingest(
         return {"document": document, "status": document.status, "evidence_units": document.element_count}
     job_id = ingest_queue.enqueue_ingest(filename, content, document_type, source_label, access_level)
     return {"job_id": job_id, "filename": filename, "status": "queued"}
+
+
+@app.post("/candidates")
+def add_candidates(candidates: list[ExtractionCandidate]):
+    """Приём готовых кандидатов извне (бэкфилл, ручная разметка).
+
+    Кандидаты проходят штатный путь: валидация чисел по правилам,
+    пороги утверждения, фиксация противоречий, проекция в граф.
+    """
+    accepted = [store.add_candidate(candidate).id for candidate in candidates]
+    return {"accepted": len(accepted)}
 
 
 @app.get("/jobs/{job_id}")
@@ -188,10 +208,21 @@ def reprocess_document(document_id: str):
         raise HTTPException(status_code=404, detail="Document not found")
     if ingest_queue is None:  # синхронный режим (INGEST_WORKERS=0)
         fragments = [fragment for fragment in store.fragments.values() if fragment.document_id == document_id]
-        candidates = store.llm.extract_entities(fragments)
-        for candidate in candidates:
-            store.add_candidate(candidate)
-        return {"document_id": document_id, "status": "completed", "candidates": len(candidates)}
+        version = store.versions[document.current_version_id]
+        document.status = version.status = DocumentStatus.processing
+        document.element_count = len(fragments)
+        store._persist_document(document, version)
+        try:
+            candidates = store.llm.extract_entities(fragments)
+            for candidate in candidates:
+                store.add_candidate(candidate)
+            document.status = version.status = DocumentStatus.completed
+            store._persist_document(document, version)
+            return {"document_id": document_id, "status": "completed", "candidates": len(candidates)}
+        except Exception:
+            document.status = version.status = DocumentStatus.failed
+            store._persist_document(document, version)
+            raise
     job_id = ingest_queue.enqueue_reprocess(document_id)
     return {"document_id": document_id, "job_id": job_id, "status": "queued"}
 
@@ -202,8 +233,8 @@ def search(request: SearchRequest):
 
 
 @app.post("/query")
-def query(request: QueryRequest):
-    return orchestrator.answer(request)
+async def query(request: QueryRequest):
+    return await orchestrator.answer(request)
 
 
 @app.get("/entities/{entity_id}")

@@ -345,6 +345,10 @@ def render_list_block(title: str, items: list[str], empty_text: str) -> None:
 
 
 def render_answer(answer: dict[str, Any], include_hypotheses: bool) -> None:
+    # Отказ LLM показывается прямо: пользователь знает, что ответ собран без модели
+    if answer.get("llm_error"):
+        st.error(f"⚠️ Проблема с LLM: {answer['llm_error']}. Ниже — данные, доступные без модели.")
+
     summary_col, metric_col = st.columns([4, 1])
     with summary_col:
         with st.container(border=True):
@@ -354,28 +358,58 @@ def render_answer(answer: dict[str, Any], include_hypotheses: bool) -> None:
         st.metric("Confidence", f"{float(answer.get('confidence') or 0):.0%}")
 
     web_answer = answer.get("web_answer") or {}
-    if web_answer.get("answer"):
+    if web_answer.get("answer") or web_answer.get("snippets"):
         with st.container(border=True):
             st.markdown("**🌐 Ответ из внешних источников** · _не верифицировано, в базу знаний не записано_")
-            st.write(web_answer["answer"])
-            if web_answer.get("url"):
-                st.markdown(f"Источник: {web_answer['url']}")
+            if web_answer.get("answer"):
+                st.write(web_answer["answer"])
+                if web_answer.get("url"):
+                    st.markdown(f"Источник: {web_answer['url']}")
+            else:
+                # LLM не ответила: показываем сырые результаты веб-поиска
+                if web_answer.get("llm_error"):
+                    st.caption("Связный ответ недоступен (LLM не ответила) — сырые результаты поиска:")
+                for item in web_answer.get("snippets", []):
+                    st.markdown(f"- [{item.get('title') or item.get('url')}]({item.get('url')}) — {item.get('snippet', '')}")
 
     experiments = answer.get("experiments", [])
+    related_experiments = answer.get("related_experiments", [])
     sources = answer.get("sources", [])
     graph = answer.get("graph", {})
     node_count = len(graph.get("nodes", []))
     edge_count = len(graph.get("edges", []))
 
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Факты", len(experiments))
+    m1.metric("Прямые факты", len(experiments))
     m2.metric("Источники", len(sources))
     m3.metric("Узлы графа", node_count)
     m4.metric("Связи", edge_count)
 
     if experiments:
-        st.markdown("#### Факты и эксперименты")
+        st.markdown("#### Прямые факты и эксперименты")
         st.dataframe(_experiments_frame(experiments), use_container_width=True, hide_index=True)
+
+    if related_experiments:
+        with st.expander(f"Смежные факты и гипотезы ({len(related_experiments)})", expanded=not experiments):
+            st.caption("Это контекст по похожим материалам, процессам или источникам; он не считается прямым ответом.")
+            st.dataframe(_experiments_frame(related_experiments), use_container_width=True, hide_index=True)
+            related_sources = answer.get("related_sources") or []
+            if related_sources:
+                st.markdown("**Источники смежных фактов**")
+                st.dataframe(_sources_frame(related_sources), use_container_width=True, hide_index=True)
+
+    # Семантический поиск bge-m3: работает и при недоступной LLM;
+    # раскрыт по умолчанию, когда фактов нет — это основной результат
+    search_hits = answer.get("search_hits") or []
+    if search_hits:
+        with st.expander(f"🔎 Найдено по смыслу ({len(search_hits)} фрагментов)", expanded=not experiments):
+            for hit in search_hits:
+                meta = hit.get("metadata") or {}
+                source = hit.get("source") or {}
+                name = meta.get("filename") or _source_name(source.get("document_id"))
+                place = _place_label(source)
+                st.markdown(f"**{name}**{' · ' + place if place else ''} · релевантность {hit.get('score', 0):.2f}")
+                st.caption((hit.get("text") or "")[:400])
 
     left, middle, right = st.columns(3)
     with left:
@@ -383,8 +417,11 @@ def render_answer(answer: dict[str, Any], include_hypotheses: bool) -> None:
     with middle:
         render_list_block("Пробелы", answer.get("gaps", []), "Не выявлены")
     with right:
-        hypothesis_text = "Включены в текущую выборку." if include_hypotheses else "Скрыты в текущей выборке."
-        render_list_block("Гипотезы", [hypothesis_text], "Не выявлены")
+        # Реальные гипотезы из режима косвенного поиска; заглушка — только если их нет
+        hypotheses = answer.get("hypotheses") or []
+        if not hypotheses and not include_hypotheses:
+            hypotheses = ["Скрыты в текущей выборке."]
+        render_list_block("Гипотезы", hypotheses, "Не выявлены")
 
     if sources:
         st.markdown("#### Источники")

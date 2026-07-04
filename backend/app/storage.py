@@ -19,7 +19,7 @@ from app.pipeline.providers import (
     RemoteEmbeddingProvider,
     RemoteExtractionProvider,
 )
-from app.pipeline.validation import validate_candidate_numbers
+from app.pipeline.validation import load_validation_rules, validate_candidate_numbers
 from app.schemas import (
     CandidateStatus,
     DocumentRecord,
@@ -55,6 +55,12 @@ class ApplicationStore:
     ):
         self.domain_dir = domain_dir
         self.normalizer = DomainNormalizer(domain_dir)
+        # Пороги кандидатов и диапазоны правдоподобия — из validation-rules.yaml
+        # (владелец — инженер знаний); дефолты сохраняют прежнее поведение
+        self.validation_rules = load_validation_rules(domain_dir)
+        thresholds = self.validation_rules.get("thresholds", {})
+        self.auto_approve_threshold = float(thresholds.get("auto_approve", AUTO_APPROVE_THRESHOLD))
+        self.reject_threshold = float(thresholds.get("review_min", 0.60))
         self.llm = RemoteExtractionProvider(extraction_service_url) if extraction_service_url else MockLLMProvider()
         # Провайдер эмбеддингов выбирается окружением: EMBEDDINGS_URL задан —
         # внешний сервис (Yandex v2, 256), не задан — детерминированный baseline (64)
@@ -204,23 +210,32 @@ class ApplicationStore:
                 document.storage_uri = stored.uri
         self._persist_document(document, version)
 
-        parser = choose_parser(filename)
-        fragments = parser.parse(document_id, version_id, filename, content)
-        version.parser = parser.name
-        for fragment in fragments:
-            self.fragments[fragment.id] = fragment
-        self._persist_fragments(fragments)
+        fragments: list[SourceFragment] = []
+        try:
+            parser = choose_parser(filename)
+            fragments = parser.parse(document_id, version_id, filename, content)
+            version.parser = parser.name
+            document.element_count = len(fragments)
+            for fragment in fragments:
+                self.fragments[fragment.id] = fragment
+            self._persist_fragments(fragments)
+            self._persist_document(document, version)
 
-        candidates = self.llm.extract_entities(fragments)
-        for candidate in candidates:
-            self.add_candidate(candidate)
+            candidates = self.llm.extract_entities(fragments)
+            for candidate in candidates:
+                self.add_candidate(candidate)
 
-        self.index_fragments(fragments)
-        document.status = DocumentStatus.completed
-        document.element_count = len(fragments)
-        version.status = DocumentStatus.completed
-        self._persist_document(document, version)
-        return document
+            self.index_fragments(fragments)
+            document.status = DocumentStatus.completed
+            version.status = DocumentStatus.completed
+            self._persist_document(document, version)
+            return document
+        except Exception:
+            document.status = DocumentStatus.failed
+            document.element_count = len(fragments)
+            version.status = DocumentStatus.failed
+            self._persist_document(document, version)
+            raise
 
     def add_candidate(self, candidate: ExtractionCandidate) -> ExtractionCandidate:
         if candidate.source:
@@ -231,10 +246,21 @@ class ApplicationStore:
                 text="",
                 normalized_text="",
             )).text
-            candidate.payload["number_validation"] = validate_candidate_numbers(candidate.payload, source_text)
-        if candidate.confidence >= AUTO_APPROVE_THRESHOLD:
-            candidate.status = CandidateStatus.approved
-        elif candidate.confidence < 0.60:
+            candidate.payload["number_validation"] = validate_candidate_numbers(
+                candidate.payload, source_text, self.validation_rules
+            )
+        number_validation = candidate.payload.get("number_validation", {})
+        quality_issues = _candidate_quality_issues(candidate.payload)
+        if quality_issues:
+            candidate.review_note = "Кандидат требует проверки: " + "; ".join(quality_issues)
+        elif candidate.confidence >= self.auto_approve_threshold:
+            if number_validation.get("validated", True):
+                candidate.status = CandidateStatus.approved
+            else:
+                # «Ошибки в числах недопустимы»: сомнительные числа не проходят
+                # в граф автоматически — только через эксперта
+                candidate.review_note = "Числа требуют проверки: " + "; ".join(number_validation.get("issues", [])[:3])
+        elif candidate.confidence < self.reject_threshold:
             candidate.status = CandidateStatus.rejected
             candidate.review_note = "Confidence below approval threshold"
         self.candidates[candidate.id] = candidate
@@ -262,15 +288,17 @@ class ApplicationStore:
         Оба факта остаются в базе как есть — статус conflicting лишь помечает
         зону разногласий и хранит ссылки на оппонентов (модель верификации из плана).
         """
-        opposite = {"increase": "decrease", "decrease": "increase"}.get(fact.effect_direction)
+        fact_direction = _normalize_effect_direction(fact.effect_direction)
+        opposite = {"increase": "decrease", "decrease": "increase"}.get(fact_direction)
         if opposite is None:
             return
+        fact_key = self._fact_conflict_key(fact)
         # list(): факты добавляются из фоновых воркеров параллельно
         for other in list(self.facts.values()):
+            other_direction = _normalize_effect_direction(other.effect_direction)
             if (
-                other.material == fact.material
-                and other.property == fact.property
-                and other.effect_direction == opposite
+                self._fact_conflict_key(other) == fact_key
+                and other_direction == opposite
             ):
                 fact.status = other.status = "conflicting"
                 if other.id not in fact.conflicts_with:
@@ -278,6 +306,11 @@ class ApplicationStore:
                 if fact.id not in other.conflicts_with:
                     other.conflicts_with.append(fact.id)
                 self._persist_fact(other)
+
+    def _fact_conflict_key(self, fact: Fact) -> tuple[str, str]:
+        material = self.normalizer.normalize_entity(fact.material) or fact.material
+        property_name = self.normalizer.normalize_entity(fact.property) or fact.property
+        return _canonical_text(material), _canonical_text(property_name)
 
     def _project_semantics(self, fact: Fact, candidate: ExtractionCandidate) -> None:
         """Переносит извлечённые сущности и связи онтологии из payload в Neo4j."""
@@ -309,9 +342,10 @@ class ApplicationStore:
 
     def index_fragments(self, fragments: list[SourceFragment]) -> None:
         # Пачками: большой документ не влезает в таймаут одного запроса,
-        # а результат фиксируется по мере готовности, а не в конце
-        for start in range(0, len(fragments), 64):
-            chunk = fragments[start : start + 64]
+        # а результат фиксируется по мере готовности, а не в конце.
+        # 16 длинных фрагментов на CPU укладываются в таймаут с запасом
+        for start in range(0, len(fragments), 16):
+            chunk = fragments[start : start + 16]
             vectors = self.embedder.embed([fragment.normalized_text for fragment in chunk])
             new_vectors: dict[str, list[float]] = {}
             for fragment, vector in zip(chunk, vectors):
@@ -428,7 +462,7 @@ class ApplicationStore:
             temperature_c=_float_or_none(payload.get("temperature_c")),
             duration_h=_float_or_none(payload.get("duration_h")),
             property=property_name,
-            effect_direction=str(payload.get("effect_direction") or "unknown"),
+            effect_direction=_normalize_effect_direction(payload.get("effect_direction")),
             effect_value=_float_or_none(payload.get("effect_value")),
             effect_unit=payload.get("effect_unit"),
             result_value=_float_or_none(payload.get("result_value")),
@@ -470,6 +504,47 @@ def _float_or_none(value: Any) -> float | None:
         return float(str(value).replace(",", "."))
     except ValueError:
         return None
+
+
+def _candidate_quality_issues(payload: dict[str, Any]) -> list[str]:
+    issues: list[str] = []
+    if _is_missing_value(payload.get("material")):
+        issues.append("material не извлечён")
+    if _is_missing_value(payload.get("property")):
+        issues.append("property не извлечён")
+    return issues
+
+
+def _is_missing_value(value: Any) -> bool:
+    if value is None:
+        return True
+    text = str(value).strip().lower().replace("ё", "е")
+    return text in {"", "не указано", "unknown", "unknown material", "unknown property", "n/a", "none", "null"}
+
+
+def _normalize_effect_direction(value: Any) -> str:
+    text = str(value or "unknown").strip().lower().replace("ё", "е")
+    aliases = {
+        "increase": "increase",
+        "increased": "increase",
+        "рост": "increase",
+        "увеличение": "increase",
+        "повышение": "increase",
+        "decrease": "decrease",
+        "decreased": "decrease",
+        "снижение": "decrease",
+        "уменьшение": "decrease",
+        "падение": "decrease",
+        "neutral": "neutral",
+        "no_change": "neutral",
+        "без изменений": "neutral",
+        "нет изменений": "neutral",
+    }
+    return aliases.get(text, text or "unknown")
+
+
+def _canonical_text(value: str) -> str:
+    return " ".join(value.strip().lower().replace("ё", "е").split())
 
 
 def _cosine(left: list[float], right: list[float]) -> float:

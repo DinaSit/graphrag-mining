@@ -11,6 +11,7 @@ import queue
 import threading
 from uuid import uuid4
 
+from app.schemas import DocumentStatus
 from app.storage import ApplicationStore
 
 log = logging.getLogger(__name__)
@@ -65,9 +66,21 @@ class IngestQueue:
                 self.tasks.task_done()
 
     def _reprocess(self, document_id: str) -> None:
+        document = self.store.documents[document_id]
+        version = self.store.versions[document.current_version_id]
         fragments = [f for f in self.store.fragments.values() if f.document_id == document_id]
-        for candidate in self.store.llm.extract_entities(fragments):
-            self.store.add_candidate(candidate)
+        document.status = version.status = DocumentStatus.processing
+        document.element_count = len(fragments)
+        self.store._persist_document(document, version)
+        try:
+            for candidate in self.store.llm.extract_entities(fragments):
+                self.store.add_candidate(candidate)
+            document.status = version.status = DocumentStatus.completed
+            self.store._persist_document(document, version)
+        except Exception:
+            document.status = version.status = DocumentStatus.failed
+            self.store._persist_document(document, version)
+            raise
 
     def _record(self, job_id: str, task: dict, status: str, error: str | None = None) -> None:
         if self.store.postgres_sink:

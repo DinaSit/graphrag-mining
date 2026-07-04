@@ -260,3 +260,45 @@ pH,водородный показатель,NumericParameter
 цианирование,cyanidation,Process
 хлорное выщелачивание,chlorine leaching,Process
 гравитационное обогащение,gravity concentration,Process
+ВП,взвешенная плавка,Process
+ВП,flash smelting,Process
+ВП,ПВП,Process
+IX,ионный обмен,Process
+IX,ion exchange,Process
+L,коэффициент распределения,NumericParameter
+L,distribution coefficient,NumericParameter
+НФ,нанофильтрация,Process
+НФ,nanofiltration,Process
+НФ,NF,Process
+ОО,обратный осмос,Process
+ОО,reverse osmosis,Process
+ОО,RO,Process
+TDS,сухой остаток,NumericParameter
+TDS,total dissolved solids,NumericParameter
+MIW,шахтные воды,Material
+MIW,mine water,Material
+MIW,Mining Influenced Water,Material
+ЭД,электродиализ,Process
+ЭД,electrodialysis,Process
+ЭД,ED,Process
+сульфат бария,barium sulfate,Material
+сульфат бария,BaSO₄,Material
+циркуляция,circulation,Process
+уголь,coal,Material
+излив,discharge,Process
+излив,outflow,Process
+утилизация,disposal,Process
+утилизация,utilization,Process
+буровой шлам,drill cuttings,Material
+электроэкстракция,electrowinning,Process
+электроэкстракция,EW,Process
+флотация,flotation,Process
+вдувание,injection,Process
+вдувание,blowing,Process
+нейтрализация,neutralization,Process
+никель,Ni,Material
+никель,nickel,Material
+осаждение,precipitation,Process
+рециркуляция,recirculation,Process
+обеднение,slag cleaning,Process
+обеднение,cleaning,Process

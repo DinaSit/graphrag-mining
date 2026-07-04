@@ -8,8 +8,10 @@
 import asyncio
 import json
 import logging
+import os
+import re
 
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 
 from app import yandex_client
 
@@ -43,42 +45,94 @@ _ANSWER_PROMPT = """Ты — научный ассистент горно-мет
 """
 
 
+# Вопросительные и служебные слова выбрасываются из поискового запроса:
+# полный текст вопроса слишком специфичен и часто даёт пустую выдачу
+_STOPWORDS = {
+    "какие", "какой", "какова", "каковы", "как", "что", "чем", "почему", "где",
+    "при", "для", "или", "если", "того", "этом", "также", "более", "менее",
+    "применяются", "используются", "существуют", "бывают", "можно", "нужно",
+    "мировой", "практике", "сегодня", "сейчас",
+}
+
+
+def _simplify(question: str) -> str:
+    words = re.findall(r"[\wА-Яа-яЁё-]+", question.lower().replace("ё", "е"))
+    keep = [w for w in words if len(w) > 3 and w not in _STOPWORDS]
+    return " ".join(keep[:8])
+
+
+def _query_hits(query: str, max_results: int) -> list[dict]:
+    with DDGS() as ddgs:
+        results = list(ddgs.text(query, max_results=max_results))
+    return [r for r in results if any(d in r.get("href", "") for d in ALLOWED_DOMAINS)]
+
+
 def _search(question: str) -> list[dict]:
     site_filter = " OR ".join(f"site:{domain}" for domain in ALLOWED_DOMAINS)
-    with DDGS() as ddgs:
-        results = list(ddgs.text(f"{question} ({site_filter})", max_results=10))
-    hits = [r for r in results if any(d in r.get("href", "") for d in ALLOWED_DOMAINS)]
-    if not hits:
-        # Поисковик мог проигнорировать site-фильтр — ищем шире и фильтруем сами
-        with DDGS() as ddgs:
-            results = list(ddgs.text(question, max_results=20))
-        hits = [r for r in results if any(d in r.get("href", "") for d in ALLOWED_DOMAINS)]
-    return hits[:8]
+    simplified = _simplify(question)
+    # Сначала короткий предметный запрос: длинный полный вопрос с OR-фильтром
+    # часто раздувает URL и замедляет выдачу. Домен всё равно проверяется ниже.
+    attempts = [
+        simplified,
+        f"{simplified} ({site_filter})",
+        question,
+    ]
+    for query in attempts:
+        if not query.strip():
+            continue
+        try:
+            hits = _query_hits(query, max_results=10)
+        except Exception as exc:
+            log.warning("Веб-поиск: попытка не дала результата (%s): %s", query[:120], exc)
+            continue
+        if hits:
+            return hits[:8]
+    return []
+
+
+def _snippet_payload(hits: list[dict]) -> list[dict]:
+    return [
+        {"title": h.get("title") or h.get("href"), "url": h.get("href"), "snippet": (h.get("body") or "")[:300]}
+        for h in hits[:5]
+    ]
 
 
 async def answer_from_web(question: str) -> dict:
-    """Возвращает {"found": bool, "answer": str|None, "url": str|None}."""
+    """Возвращает {"found", "answer", "url", "snippets", "llm_error"}.
+
+    Поиск работает без LLM; связную формулировку даёт каскад LLM
+    (Яндекс → запасной). Если обе модели недоступны — found=True с сырыми
+    выдержками и llm_error вместо связного ответа: пользователь всё равно
+    получает найденное.
+    """
     try:
-        hits = await asyncio.to_thread(_search, question)
+        timeout = float(os.getenv("WEB_SEARCH_TIMEOUT", "12"))
+        hits = await asyncio.wait_for(asyncio.to_thread(_search, question), timeout=timeout)
     except Exception as exc:
         log.error("Веб-поиск недоступен: %s", exc)
-        return {"found": False, "answer": None, "url": None}
+        return {"found": False, "answer": None, "url": None, "snippets": []}
     if not hits:
-        return {"found": False, "answer": None, "url": None}
+        return {"found": False, "answer": None, "url": None, "snippets": []}
 
     snippets = "\n".join(f"- {h.get('title', '')}: {h.get('body', '')} ({h.get('href', '')})" for h in hits)
     try:
-        data = await yandex_client.chat_json([{
-            "role": "user",
-            "content": _ANSWER_PROMPT.format(question=question, snippets=snippets),
-        }])
-    except (yandex_client.YandexClientError, json.JSONDecodeError, ValueError) as exc:
-        log.error("Генерация веб-ответа не удалась: %s", exc)
-        return {"found": False, "answer": None, "url": None}
+        llm_timeout = float(os.getenv("WEB_LLM_TIMEOUT", "8"))
+        data = await asyncio.wait_for(
+            yandex_client.chat_json([{
+                "role": "user",
+                "content": _ANSWER_PROMPT.format(question=question, snippets=snippets),
+            }], allow_fallback=True),
+            timeout=llm_timeout,
+        )
+    except (asyncio.TimeoutError, yandex_client.YandexClientError, json.JSONDecodeError, ValueError) as exc:
+        message = "LLM-сводка веб-результатов не уложилась в таймаут" if isinstance(exc, asyncio.TimeoutError) else str(exc)
+        log.error("Генерация веб-ответа не удалась: %s", message)
+        return {"found": True, "answer": None, "url": hits[0].get("href"),
+                "snippets": _snippet_payload(hits), "llm_error": message[:300]}
 
     if not data.get("found") or not data.get("answer"):
-        return {"found": False, "answer": None, "url": None}
+        return {"found": False, "answer": None, "url": None, "snippets": []}
     # Ссылка должна существовать в выдаче, а не быть сочинённой моделью
     urls = {h.get("href") for h in hits}
     url = data.get("url") if data.get("url") in urls else hits[0].get("href")
-    return {"found": True, "answer": data["answer"], "url": url}
+    return {"found": True, "answer": data["answer"], "url": url, "snippets": _snippet_payload(hits)}

@@ -17,12 +17,23 @@ services:
     environment:
       YANDEX_API_KEY: ${YANDEX_API_KEY:?добавьте YANDEX_API_KEY в .env в корне репозитория}
       YANDEX_FOLDER_ID: ${YANDEX_FOLDER_ID:-b1ggusvist6c2sia1dno}
+      # LLM-провайдер задаётся в .env: Yandex AI Studio (по умолчанию) или любой
+      # OpenAI-совместимый сервер (Ollama: http://host.docker.internal:11434/v1)
+      YANDEX_BASE_URL: ${YANDEX_BASE_URL:-https://llm.api.cloud.yandex.net/v1}
       YANDEX_MODEL: ${YANDEX_MODEL:-qwen3.6-35b-a3b/latest}
+      # Запасной LLM для query-вызовов (/chat_json, /web_answer); /extract — только основной
+      FALLBACK_BASE_URL: ${FALLBACK_BASE_URL:-}
+      FALLBACK_MODEL: ${FALLBACK_MODEL:-minimax-m3:cloud}
       DOMAIN_DIR: /domain/default
       # Квота чата держит 4 параллельных запроса (ретраи с паузами настроены)
       LLM_CONCURRENCY: "4"
+      LLM_RETRIES: ${LLM_RETRIES:-6}
+      WEB_SEARCH_TIMEOUT: ${WEB_SEARCH_TIMEOUT:-8}
+      WEB_LLM_TIMEOUT: ${WEB_LLM_TIMEOUT:-6}
     volumes:
       - ./domain:/domain:ro
+      # Кэш весов bge-m3 (~2.3 ГБ): скачиваются один раз, переживают пересборки
+      - hf-cache:/root/.cache/huggingface
     ports:
       - "8002:8002"
     healthcheck:
@@ -47,9 +58,13 @@ services:
       # Семантический индекс: эмбеддинги Yandex v2 (256 изм.) через сервис ml-extraction.
       # Убрать переменную — backend вернётся на deterministic-hash (64).
       EMBEDDINGS_URL: http://ml-extraction:8002/embed
+      # Эмбеддинги bge-m3: размерность 1024, таймаут с запасом под CPU-обсчёт пачки
+      EMBEDDING_DIM: "1024"
+      EMBEDDING_TIMEOUT: "300"
       # Веб-поиск по внешним источникам, когда база знаний не дала ответа.
       # Убрать переменную — ступень отключится.
       WEB_ANSWER_URL: http://ml-extraction:8002/web_answer
+      WEB_ANSWER_TIMEOUT: ${WEB_ANSWER_TIMEOUT:-20}
     depends_on:
       ml-extraction:
         condition: service_healthy
@@ -60,3 +75,6 @@ services:
   streamlit:
     environment:
       STREAMLIT_THEME_BASE: "light"
+
+volumes:
+  hf-cache:

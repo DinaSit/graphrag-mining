@@ -8,8 +8,11 @@ YANDEX_BASE_URL = os.environ.get("YANDEX_BASE_URL", "https://llm.api.cloud.yande
 
 # Короткое имя достраивается до gpt://<folder>/<name>; полный URI можно задать напрямую
 YANDEX_MODEL = os.environ.get("YANDEX_MODEL", "qwen3.6-35b-a3b/latest")
-YANDEX_EMB_DOC_MODEL = os.environ.get("YANDEX_EMB_DOC_MODEL", "text-embeddings-v2-doc/latest")
-YANDEX_EMB_QUERY_MODEL = os.environ.get("YANDEX_EMB_QUERY_MODEL", "text-embeddings-v2-query/latest")
+
+# Запасной OpenAI-совместимый сервер (Ollama) для query-вызовов; пустая строка — фолбек выключен.
+# Извлечение (/extract) фолбеком не пользуется: инжест работает только через основной LLM.
+FALLBACK_BASE_URL = os.environ.get("FALLBACK_BASE_URL", "")
+FALLBACK_MODEL = os.environ.get("FALLBACK_MODEL", "minimax-m3:cloud")
 
 LLM_TIMEOUT = float(os.environ.get("LLM_TIMEOUT", "120"))
 LLM_CONCURRENCY = int(os.environ.get("LLM_CONCURRENCY", "2"))
@@ -23,5 +26,8 @@ MIN_FRAGMENT_CHARS = int(os.environ.get("MIN_FRAGMENT_CHARS", "40"))
 
 def model_uri(name: str, scheme: str = "gpt") -> str:
     if name.startswith(("gpt://", "emb://")):
+        return name
+    if "yandex" not in YANDEX_BASE_URL:
+        # Сторонний OpenAI-совместимый сервер (например, Ollama): имя модели как есть
         return name
     return f"{scheme}://{YANDEX_FOLDER_ID}/{name}"

@@ -276,17 +276,18 @@ class PostgresSink:
             "ALTER TABLE facts ADD COLUMN IF NOT EXISTS conflicts_with JSONB NOT NULL DEFAULT '[]'::jsonb",
             # Индекс векторного поиска: близость считает PostgreSQL, а не backend
             "CREATE INDEX IF NOT EXISTS fragment_vectors_embedding_idx ON fragment_vectors USING hnsw (embedding vector_cosine_ops)",
-            # Совместимость с базами, созданными до перехода на remote-эмбеддинги
-            # (256 изм.): старые векторы deterministic-hash (64) вычищаются,
-            # колонка расширяется. На vector(256) блок ничего не делает.
+            # Совместимость с базами, созданными на прежних моделях эмбеддингов
+            # (deterministic-hash 64, Yandex v2 256): несовместимые векторы
+            # вычищаются, колонка приводится к bge-m3 (1024); переиндексацию
+            # выполняет hydrate при старте. На vector(1024) блок ничего не делает.
             """
             DO $$
             BEGIN
                 IF (SELECT format_type(atttypid, atttypmod) FROM pg_attribute
                     WHERE attrelid = 'fragment_vectors'::regclass
-                      AND attname = 'embedding') <> 'vector(256)' THEN
+                      AND attname = 'embedding') <> 'vector(1024)' THEN
                     TRUNCATE fragment_vectors;
-                    ALTER TABLE fragment_vectors ALTER COLUMN embedding TYPE vector(256);
+                    ALTER TABLE fragment_vectors ALTER COLUMN embedding TYPE vector(1024);
                 END IF;
             END $$;
             """,
@@ -632,6 +633,20 @@ class Neo4jSink:
                     "object_id": f"{object_label.lower()}-{_slug(obj)}",
                 },
             )
+
+    def run_read(self, query: str, params: dict) -> list[dict]:
+        """Чтение из графа произвольным Cypher (шаблоны query-слоя)."""
+        if not self.enabled:
+            return []
+        rows: list[dict] = []
+        try:
+            with GraphDatabase.driver(self.uri, auth=(self.user, self.password)) as driver:
+                with driver.session() as session:
+                    for record in session.run(query, **params):
+                        rows.append(dict(record))
+        except Exception as exc:  # pragma: no cover - integration-only path
+            self.last_error = str(exc)
+        return rows
 
     def delete_document(self, document_id: str, claim_ids: list[str]) -> None:
         """Удаляет из графа узлы документа и осиротевшие вершины."""
