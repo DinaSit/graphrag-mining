@@ -47,7 +47,14 @@ def reprocess_document(store: ApplicationStore, document_id: str, chunk_size: in
         raise KeyError(f"Document not found: {document_id}")
     fragments = [fragment for fragment in store.fragments.values() if fragment.document_id == document_id]
     fragments.sort(key=lambda fragment: fragment.id)
-    set_status(store, document_id, DocumentStatus.processing, len(fragments))
+    total_fragments = len(fragments)
+    processed_fragment_ids = {
+        candidate.source.fragment_id
+        for candidate in store.candidates.values()
+        if candidate.source and candidate.source.document_id == document_id
+    }
+    fragments = [fragment for fragment in fragments if fragment.id not in processed_fragment_ids]
+    set_status(store, document_id, DocumentStatus.processing, total_fragments)
 
     accepted = 0
     try:
@@ -58,14 +65,21 @@ def reprocess_document(store: ApplicationStore, document_id: str, chunk_size: in
                 store.add_candidate(candidate)
             accepted += len(candidates)
             print(
-                f"{document_id}: fragments {min(start + len(chunk), len(fragments))}/{len(fragments)}, "
-                f"new_candidates={len(candidates)}, total_candidates={accepted}",
+                f"{document_id}: fragments {len(processed_fragment_ids) + min(start + len(chunk), len(fragments))}/"
+                f"{total_fragments}, new_candidates={len(candidates)}, total_candidates={accepted}",
                 flush=True,
             )
-        set_status(store, document_id, DocumentStatus.completed if accepted else DocumentStatus.failed, len(fragments))
-        return len(fragments), accepted
+        total_candidates = len(
+            [
+                candidate
+                for candidate in store.candidates.values()
+                if candidate.source and candidate.source.document_id == document_id
+            ]
+        )
+        set_status(store, document_id, DocumentStatus.completed if total_candidates else DocumentStatus.failed, total_fragments)
+        return total_fragments, accepted
     except Exception:
-        set_status(store, document_id, DocumentStatus.failed, len(fragments))
+        set_status(store, document_id, DocumentStatus.failed, total_fragments)
         raise
 
 

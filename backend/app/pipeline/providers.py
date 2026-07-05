@@ -5,11 +5,13 @@ import json
 import math
 import os
 import re
+import threading
 import urllib.error
 import urllib.request
+from collections import OrderedDict
 from typing import Any
 
-from app.schemas import ExtractionCandidate, ParsedQuestion, QueryRequest, SearchHit, SourceRef, SourceFragment
+from app.schemas import ExtractionCandidate, SourceRef, SourceFragment
 
 
 class DeterministicEmbeddingProvider:
@@ -58,66 +60,6 @@ class MockLLMProvider:
                 )
             )
         return candidates
-
-    def extract_relations(self, fragments: list[SourceFragment]) -> list[ExtractionCandidate]:
-        return []
-
-    def parse_question(self, question: str) -> ParsedQuestion:
-        lower = question.lower().replace("ё", "е")
-        material = None
-        if re.search(r"сплав\w*\s+x", lower) or "alloy x" in lower:
-            material = "Сплав X"
-        else:
-            match = re.search(r"(сплав\s+[a-zа-я0-9-]+|alloy\s+[a-z0-9-]+)", lower, re.IGNORECASE)
-            if match:
-                material = match.group(1).strip().title()
-
-        property_name = None
-        if "тверд" in lower or "hardness" in lower:
-            property_name = "твёрдость"
-        elif "сульфат" in lower or "sulfate" in lower:
-            property_name = "сульфаты"
-        elif "хлорид" in lower or "chloride" in lower:
-            property_name = "хлориды"
-        elif "сух" in lower and "остат" in lower:
-            property_name = "сухой остаток"
-        elif "циркуляц" in lower and "католит" in lower:
-            property_name = "скорость циркуляции католита"
-        elif "выход" in lower and ("металл" in lower or "никел" in lower):
-            property_name = "выход металла"
-
-        if material is None:
-            if "шахт" in lower and "вод" in lower:
-                material = "шахтные воды"
-            elif "католит" in lower or "catholyte" in lower:
-                material = "католит"
-            elif "катод" in lower or "nickel cathode" in lower:
-                material = "никелевые катоды"
-        temp_min = temp_max = None
-        range_match = re.search(r"(\d{2,4})\s*[–-]\s*(\d{2,4})\s*(?:°?\s*[cс])?", lower)
-        if range_match:
-            temp_min = float(range_match.group(1))
-            temp_max = float(range_match.group(2))
-        else:
-            one_temp = re.search(r"(\d{2,4})\s*(?:°?\s*[cс])", lower)
-            if one_temp:
-                temp_min = temp_max = float(one_temp.group(1))
-
-        return ParsedQuestion(
-            intent="compare_experiments",
-            material=material,
-            property=property_name,
-            temperature_min=temp_min,
-            temperature_max=temp_max,
-        )
-
-    def summarize_results(self, request: QueryRequest, hits: list[SearchHit]) -> str:
-        if not hits:
-            return "По доступным фрагментам не найдено подтвержденных результатов."
-        return f"Найдено {len(hits)} релевантных фрагментов с привязкой к первоисточникам."
-
-    def generate_answer(self, request: QueryRequest, hits: list[SearchHit]) -> str:
-        return self.summarize_results(request, hits)
 
     def _payload_from_row(self, row: dict[str, Any]) -> dict[str, Any] | None:
         material = row.get("material") or row.get("материал")
@@ -189,10 +131,16 @@ class RemoteEmbeddingProvider:
 
     name = "remote-embeddings"
 
+    # Кэш держит эмбеддинги повторных вопросов и неизменённых фрагментов
+    # (reprocess, переиндексация при старте) — без похода в сервис
+    _CACHE_MAX = 20000
+
     def __init__(self, embed_url: str):
         self.embed_url = embed_url
         self.dimensions = int(os.environ.get("EMBEDDING_DIM", "1024"))  # bge-m3
         self.timeout = float(os.environ.get("EMBEDDING_TIMEOUT", "120"))
+        self._cache: OrderedDict[tuple[str, str], list[float]] = OrderedDict()
+        self._cache_lock = threading.Lock()
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         return self._call(texts, kind="doc")
@@ -202,6 +150,31 @@ class RemoteEmbeddingProvider:
         return self._call(texts, kind="query")
 
     def _call(self, texts: list[str], kind: str) -> list[list[float]]:
+        # Режим входит в ключ: query- и doc-векторы одной модели не взаимозаменяемы
+        keys = [(kind, hashlib.sha256(text.encode("utf-8")).hexdigest()) for text in texts]
+        results: dict[int, list[float]] = {}
+        with self._cache_lock:
+            for index, key in enumerate(keys):
+                cached = self._cache.get(key)
+                if cached is not None:
+                    self._cache.move_to_end(key)
+                    results[index] = cached
+        miss_indexes = [index for index in range(len(texts)) if index not in results]
+        if miss_indexes:
+            fetched = self._fetch([texts[index] for index in miss_indexes], kind)
+            if len(fetched) != len(miss_indexes):
+                raise ValueError(
+                    f"Сервис эмбеддингов вернул {len(fetched)} векторов на {len(miss_indexes)} текстов"
+                )
+            with self._cache_lock:
+                for index, vector in zip(miss_indexes, fetched):
+                    results[index] = vector
+                    self._cache[keys[index]] = vector
+                    if len(self._cache) > self._CACHE_MAX:
+                        self._cache.popitem(last=False)
+        return [results[index] for index in range(len(texts))]
+
+    def _fetch(self, texts: list[str], kind: str) -> list[list[float]]:
         request = urllib.request.Request(
             self.embed_url,
             data=json.dumps({"texts": texts, "kind": kind}, ensure_ascii=False).encode("utf-8"),
@@ -216,9 +189,8 @@ class RemoteEmbeddingProvider:
 class RemoteExtractionProvider:
     name = "remote-extraction"
 
-    def __init__(self, extract_url: str, fallback: MockLLMProvider | None = None):
+    def __init__(self, extract_url: str):
         self.extract_url = extract_url
-        self.fallback = fallback or MockLLMProvider()
         # Реальный LLM-сервис обрабатывает батч фрагментов дольше 8с;
         # таймаут настраивается снаружи (EXTRACTION_TIMEOUT, секунды)
         self.timeout = float(os.environ.get("EXTRACTION_TIMEOUT", "8"))
@@ -247,15 +219,3 @@ class RemoteExtractionProvider:
                 raise RuntimeError(f"Сервис извлечения недоступен, инжест остановлен: {exc}") from exc
             candidates.extend(ExtractionCandidate.model_validate(item) for item in data.get("candidates", []))
         return candidates
-
-    def extract_relations(self, fragments: list[SourceFragment]) -> list[ExtractionCandidate]:
-        return []
-
-    def parse_question(self, question: str) -> ParsedQuestion:
-        return self.fallback.parse_question(question)
-
-    def summarize_results(self, request: QueryRequest, hits: list[SearchHit]) -> str:
-        return self.fallback.summarize_results(request, hits)
-
-    def generate_answer(self, request: QueryRequest, hits: list[SearchHit]) -> str:
-        return self.fallback.generate_answer(request, hits)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -8,6 +9,8 @@ try:
     from minio import Minio
 except ImportError:  # pragma: no cover
     Minio = None
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -61,10 +64,15 @@ class MinioFileStorage:
                 length=len(content),
                 content_type=content_type,
             )
-            return StoredObject(bucket=self.bucket, object_name=object_name, uri=f"s3://{self.bucket}/{object_name}")
-        except Exception as exc:  # pragma: no cover - integration-only path
+            stored = StoredObject(bucket=self.bucket, object_name=object_name, uri=f"s3://{self.bucket}/{object_name}")
+            self.last_error = None
+            return stored
+        except Exception as exc:
+            # Оригинал документа — часть провенанса: терять его молча нельзя,
+            # инжест должен завершиться как failed с текстом ошибки
             self.last_error = str(exc)
-            return None
+            log.error("MinIO: файл документа %s не сохранён: %s", document_id, exc)
+            raise
 
     def delete_document(self, document_id: str) -> None:
         if not self.enabled:
@@ -75,8 +83,13 @@ class MinioFileStorage:
             prefix = f"documents/{document_id}/"
             for obj in list(client.list_objects(self.bucket, prefix=prefix, recursive=True)):
                 client.remove_object(self.bucket, obj.object_name)
-        except Exception as exc:  # pragma: no cover - integration-only path
+            self.last_error = None
+        except Exception as exc:
+            # Осиротевшие объекты копятся навсегда: клиент должен увидеть
+            # ошибку и повторить удаление
             self.last_error = str(exc)
+            log.error("MinIO: файлы документа %s не удалены: %s", document_id, exc)
+            raise
 
     def _get_client(self):
         if self._client is None:

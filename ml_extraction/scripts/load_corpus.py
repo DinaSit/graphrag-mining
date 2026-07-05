@@ -2,8 +2,10 @@
 """Загрузка корпуса документов в базу знаний через POST /ingest.
 
 Файлы .doc конвертируются в .docx автоматически (textutil, только macOS).
-Загрузка последовательная: /ingest синхронный, параллельные запросы
-перегружают backend.
+/ingest ставит документ в очередь и сразу отвечает {"job_id", "status": "queued"};
+скрипт дожидается завершения job через GET /jobs/{job_id}, поэтому итоговая
+статистика отражает фактический статус обработки, а загрузка идёт
+последовательно и не перегружает backend.
 
 Запуск:
     python scripts/load_corpus.py --src <папка> [--limit N] [--backend URL]
@@ -19,6 +21,25 @@ import httpx
 
 SUPPORTED = {".pdf", ".docx", ".docm", ".pptx", ".txt", ".md", ".csv", ".xlsx", ".xlsm"}
 CONVERTIBLE = {".doc"}
+
+
+# Извлечение реального документа занимает минуты; предел ожидания одного job —
+# с большим запасом, чтобы не бросить живую обработку
+JOB_WAIT_LIMIT = 3600.0
+JOB_POLL_INTERVAL = 3.0
+
+
+def wait_for_job(backend: str, job_id: str) -> dict:
+    """Поллит GET /jobs/{job_id} до completed/failed; возвращает финальный job."""
+    deadline = time.monotonic() + JOB_WAIT_LIMIT
+    while time.monotonic() < deadline:
+        response = httpx.get(f"{backend}/jobs/{job_id}", timeout=30)
+        response.raise_for_status()
+        job = response.json()
+        if job.get("status") in ("completed", "failed"):
+            return job
+        time.sleep(JOB_POLL_INTERVAL)
+    raise TimeoutError(f"job {job_id} не завершился за {JOB_WAIT_LIMIT:.0f}с")
 
 
 def convert_doc(path: Path, tmp_dir: Path) -> Path | None:
@@ -83,9 +104,20 @@ def main() -> int:
                     )
                 response.raise_for_status()
                 payload = response.json()
-                units = payload.get("evidence_units", "?")
-                loaded.append(path.name)
-                print(f"OK: {units} evidence units за {time.monotonic() - t0:.0f}с")
+                # Очередь отвечает мгновенным "queued": реальный итог известен
+                # только после завершения job (иначе фоновые падения инжеста
+                # не попали бы в статистику)
+                if payload.get("status") == "queued" and payload.get("job_id"):
+                    job = wait_for_job(args.backend, payload["job_id"])
+                    if job.get("status") == "failed":
+                        raise RuntimeError(f"job failed: {job.get('error') or 'без описания'}")
+                    loaded.append(path.name)
+                    print(f"OK за {time.monotonic() - t0:.0f}с")
+                else:
+                    # синхронный режим backend или дубль по чек-сумме
+                    units = payload.get("evidence_units", "?")
+                    loaded.append(path.name)
+                    print(f"OK: {units} evidence units за {time.monotonic() - t0:.0f}с")
             except Exception as exc:
                 failed.append((path.name, str(exc)[:120]))
                 print(f"ОШИБКА: {exc}")

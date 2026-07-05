@@ -6,20 +6,26 @@
 """
 import asyncio
 import logging
+import threading
 
 log = logging.getLogger(__name__)
 
 _MODEL_NAME = "BAAI/bge-m3"
 _model = None
+# _get_model работает в пуле потоков (asyncio.to_thread): без блокировки два
+# конкурентных первых /embed загрузили бы модель (~2.3 ГБ) дважды
+_model_lock = threading.Lock()
 
 
 def _get_model():
     global _model
     if _model is None:
-        from sentence_transformers import SentenceTransformer
+        with _model_lock:
+            if _model is None:
+                from sentence_transformers import SentenceTransformer
 
-        log.info("Загрузка модели эмбеддингов %s (первый запуск скачивает веса)", _MODEL_NAME)
-        _model = SentenceTransformer(_MODEL_NAME)
+                log.info("Загрузка модели эмбеддингов %s (первый запуск скачивает веса)", _MODEL_NAME)
+                _model = SentenceTransformer(_MODEL_NAME)
     return _model
 
 

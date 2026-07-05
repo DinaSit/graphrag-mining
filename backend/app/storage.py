@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-import math
+import logging
 import os
 import threading
 from datetime import datetime, timezone
@@ -10,7 +10,7 @@ from typing import Any
 from uuid import uuid4
 
 from app.file_storage import MinioFileStorage
-from app.persistence import Neo4jSink, PostgresSink
+from app.persistence import Neo4jSink, PostgresSink, _slug
 from app.pipeline.normalization import DomainNormalizer
 from app.pipeline.parsers import choose_parser
 from app.pipeline.providers import (
@@ -36,6 +36,13 @@ from app.schemas import (
     SourceFragment,
 )
 
+
+try:
+    from psycopg.errors import UniqueViolation
+except ImportError:  # pragma: no cover
+    UniqueViolation = None
+
+log = logging.getLogger(__name__)
 
 AUTO_APPROVE_THRESHOLD = 0.85
 
@@ -76,6 +83,16 @@ class ApplicationStore:
         self.facts: dict[str, Fact] = {}
         self.ontology_candidates: dict[str, OntologyCandidate] = {}
         self.fragment_vectors: dict[str, list[float]] = {}
+        # Дедуп по checksum: проверка и регистрация документа атомарны,
+        # иначе два ingest-воркера создают дубликаты одного файла
+        self._ingest_lock = threading.Lock()
+        # Документы, удаление которых уже началось: reprocess сверяется с этим
+        # набором под тем же локом, иначе результаты извлечения, пришедшие во
+        # время удаления, ре-INSERT-ят документ-призрак в PG/Neo4j
+        self._deleting: set[str] = set()
+        # Монотонный счётчик изменений данных: кэш ответов /ask валиден,
+        # только пока версия не изменилась
+        self.data_version = 0
 
     def hydrate_from_postgres(self) -> None:
         """Восстанавливает состояние из PostgreSQL после перезапуска backend-а."""
@@ -88,6 +105,7 @@ class ApplicationStore:
         self.candidates.update(state["candidates"])
         self.facts.update(state["facts"])
         self.fragment_vectors.update(state["vectors"])
+        self.ontology_candidates.update(state.get("ontology_candidates", {}))
         # Фрагменты без векторов (например, после смены модели эмбеддингов)
         # индексируются заново в фоне: старт backend не блокируется
         missing = [fragment for fid, fragment in self.fragments.items() if fid not in self.fragment_vectors]
@@ -110,26 +128,43 @@ class ApplicationStore:
         факты, узлы графа. Общие сущности остаются, если на них ссылаются другие
         документы; осиротевшие вершины вычищаются.
         """
-        document = self.documents.get(document_id)
-        if document is None:
-            raise KeyError(document_id)
+        with self._ingest_lock:
+            document = self.documents.get(document_id)
+            if document is None or document_id in self._deleting:
+                raise KeyError(document_id)
+            # Тумбстоун ставится до чистки внешних хранилищ: reprocess под тем же
+            # локом видит его и отбрасывает результаты извлечения, а не ре-INSERT-ит
+            # только что удалённые строки
+            self._deleting.add(document_id)
 
-        fragment_ids = [fid for fid, f in list(self.fragments.items()) if f.document_id == document_id]
-        fact_ids = [fid for fid, f in list(self.facts.items()) if f.source.document_id == document_id]
-        candidate_ids = [
-            cid for cid, c in list(self.candidates.items())
-            if c.source is not None and c.source.document_id == document_id
-        ]
+        try:
+            fragment_ids = [fid for fid, f in list(self.fragments.items()) if f.document_id == document_id]
+            fact_ids = [fid for fid, f in list(self.facts.items()) if f.source.document_id == document_id]
+            candidate_ids = [
+                cid for cid, c in list(self.candidates.items())
+                if c.source is not None and c.source.document_id == document_id
+            ]
 
-        for fid in fragment_ids:
-            self.fragments.pop(fid, None)
-            self.fragment_vectors.pop(fid, None)
-        for cid in candidate_ids:
-            self.candidates.pop(cid, None)
-        for fid in fact_ids:
-            self.facts.pop(fid, None)
-        self.versions.pop(document.current_version_id, None)
-        self.documents.pop(document_id, None)
+            # Сначала внешние хранилища: при сбое память не тронута,
+            # и клиент может повторить удаление
+            if self.postgres_sink:
+                self.postgres_sink.delete_document_data(document_id)
+            if self.graph_sink:
+                self.graph_sink.delete_document(document_id, fact_ids)
+            if self.file_storage:
+                self.file_storage.delete_document(document_id)
+
+            for fid in fragment_ids:
+                self.fragments.pop(fid, None)
+                self.fragment_vectors.pop(fid, None)
+            for cid in candidate_ids:
+                self.candidates.pop(cid, None)
+            for fid in fact_ids:
+                self.facts.pop(fid, None)
+            self.versions.pop(document.current_version_id, None)
+            self.documents.pop(document_id, None)
+        finally:
+            self._deleting.discard(document_id)
 
         # Снять пометку спора у оппонентов удалённых фактов
         removed = set(fact_ids)
@@ -140,13 +175,7 @@ class ApplicationStore:
                     fact.status = "approved"
                 self._persist_fact(fact)
 
-        if self.postgres_sink:
-            self.postgres_sink.delete_document_data(document_id)
-        if self.graph_sink:
-            self.graph_sink.delete_document(document_id, fact_ids)
-        if self.file_storage:
-            self.file_storage.delete_document(document_id)
-
+        self.data_version += 1
         return {"document_id": document_id, "fragments": len(fragment_ids),
                 "candidates": len(candidate_ids), "facts": len(fact_ids)}
 
@@ -172,43 +201,57 @@ class ApplicationStore:
         access_level: str = "uploaded",
     ) -> DocumentRecord:
         checksum = hashlib.sha256(content).hexdigest()
-        duplicate = self.find_document_by_checksum(checksum)
-        if duplicate:
-            return duplicate
+        with self._ingest_lock:
+            duplicate = self.find_document_by_checksum(checksum)
+            if duplicate:
+                return duplicate
 
-        document_id = f"doc-{uuid4().hex[:10]}"
-        version_id = f"{document_id}-v1"
-        now = _now()
-        doc_type = document_type or Path(filename).suffix.lstrip(".") or "text"
-        document = DocumentRecord(
-            id=document_id,
-            filename=filename,
-            document_type=doc_type,
-            source_label=source_label,
-            access_level=access_level,
-            checksum=checksum,
-            current_version_id=version_id,
-            status=DocumentStatus.processing,
-            created_at=now,
-        )
-        version = DocumentVersion(
-            id=version_id,
-            document_id=document_id,
-            checksum=checksum,
-            version_number=1,
-            status=DocumentStatus.processing,
-            parser="auto",
-            created_at=now,
-        )
-        self.documents[document_id] = document
-        self.versions[version_id] = version
-        if self.file_storage:
-            stored = self.file_storage.put_document(document_id, version_id, filename, content)
-            if stored:
-                document.storage_bucket = stored.bucket
-                document.storage_object = stored.object_name
-                document.storage_uri = stored.uri
-        self._persist_document(document, version)
+            document_id = f"doc-{uuid4().hex[:10]}"
+            version_id = f"{document_id}-v1"
+            now = _now()
+            doc_type = document_type or Path(filename).suffix.lstrip(".") or "text"
+            document = DocumentRecord(
+                id=document_id,
+                filename=filename,
+                document_type=doc_type,
+                source_label=source_label,
+                access_level=access_level,
+                checksum=checksum,
+                current_version_id=version_id,
+                status=DocumentStatus.processing,
+                created_at=now,
+            )
+            version = DocumentVersion(
+                id=version_id,
+                document_id=document_id,
+                checksum=checksum,
+                version_number=1,
+                status=DocumentStatus.processing,
+                parser="auto",
+                created_at=now,
+            )
+            self.documents[document_id] = document
+            self.versions[version_id] = version
+        try:
+            if self.file_storage:
+                stored = self.file_storage.put_document(document_id, version_id, filename, content)
+                if stored:
+                    document.storage_bucket = stored.bucket
+                    document.storage_object = stored.object_name
+                    document.storage_uri = stored.uri
+            self._persist_document(document, version)
+        except Exception as exc:
+            # Второй backend-процесс мог записать тот же файл: UNIQUE(checksum)
+            # в PG — последний рубеж дедупа, возвращаем существующий документ
+            existing = self._existing_on_unique_violation(exc, checksum, document_id, version_id)
+            if existing:
+                return existing
+            document.status = version.status = DocumentStatus.failed
+            try:
+                self._persist_document(document, version)
+            except Exception:
+                log.exception("Не удалось сохранить статус failed документа %s", document_id)
+            raise
 
         fragments: list[SourceFragment] = []
         try:
@@ -229,28 +272,51 @@ class ApplicationStore:
             document.status = DocumentStatus.completed
             version.status = DocumentStatus.completed
             self._persist_document(document, version)
+            self.data_version += 1
             return document
         except Exception:
             document.status = DocumentStatus.failed
             document.element_count = len(fragments)
             version.status = DocumentStatus.failed
-            self._persist_document(document, version)
+            try:
+                self._persist_document(document, version)
+            except Exception:
+                # Причина сбоя важнее статуса: исходное исключение не подменяется
+                log.exception("Не удалось сохранить статус failed документа %s", document_id)
             raise
+
+    def _existing_on_unique_violation(
+        self, exc: Exception, checksum: str, document_id: str, version_id: str
+    ) -> DocumentRecord | None:
+        if UniqueViolation is None or not isinstance(exc, UniqueViolation):
+            return None
+        self.documents.pop(document_id, None)
+        self.versions.pop(version_id, None)
+        if self.file_storage:
+            try:
+                self.file_storage.delete_document(document_id)
+            except Exception:
+                log.exception("Не удалось убрать файл проигравшего дубля %s из MinIO", document_id)
+        return self.find_document_by_checksum(checksum)
 
     def add_candidate(self, candidate: ExtractionCandidate) -> ExtractionCandidate:
         if candidate.source:
-            source_text = candidate.source.quote or self.fragments.get(candidate.source.fragment_id, SourceFragment(
-                id=candidate.source.fragment_id,
-                document_id=candidate.source.document_id,
-                version_id=candidate.source.version_id,
-                text="",
-                normalized_text="",
-            )).text
+            # Числа сверяются с полным текстом фрагмента: цитата обрезана
+            # до 220 символов и заведомо не содержит всех значений
+            fragment = self.fragments.get(candidate.source.fragment_id)
+            source_text = (fragment.text if fragment else "") or candidate.source.quote or ""
             candidate.payload["number_validation"] = validate_candidate_numbers(
                 candidate.payload, source_text, self.validation_rules
             )
         number_validation = candidate.payload.get("number_validation", {})
         quality_issues = _candidate_quality_issues(candidate.payload)
+        if candidate.source is None:
+            # Инвариант системы: факт существует только со ссылкой на первоисточник,
+            # поэтому кандидат без source не может быть approved — даже если
+            # статус уже проставлен снаружи (бэкфилл через /candidates)
+            quality_issues.append("нет ссылки на source fragment")
+            if candidate.status == CandidateStatus.approved:
+                candidate.status = CandidateStatus.pending_review
         if quality_issues:
             candidate.review_note = "Кандидат требует проверки: " + "; ".join(quality_issues)
         elif candidate.confidence >= self.auto_approve_threshold:
@@ -269,6 +335,57 @@ class ApplicationStore:
             self.approve_candidate(candidate.id)
         return candidate
 
+    def reprocess_document(self, document_id: str) -> int:
+        """Повторное извлечение по сохранённым фрагментам документа.
+
+        Возвращает число принятых в обработку кандидатов. Отклонённые экспертом
+        кандидаты не перезаписываются: решение эксперта сильнее пере-извлечения.
+        """
+        with self._ingest_lock:
+            if document_id in self._deleting:
+                raise KeyError(document_id)
+            document = self.documents[document_id]
+            version = self.versions[document.current_version_id]
+            fragments = [f for f in list(self.fragments.values()) if f.document_id == document_id]
+            document.status = version.status = DocumentStatus.processing
+            document.element_count = len(fragments)
+            self._persist_document(document, version)
+        try:
+            candidates = self.llm.extract_entities(fragments)
+            accepted = 0
+            for candidate in candidates:
+                # Документ могли удалить, пока шло извлечение (окно — минуты):
+                # проверка и запись атомарны под общим с delete_document локом,
+                # иначе документ-призрак воскресает в PG/Neo4j
+                with self._ingest_lock:
+                    if not self._document_alive(document_id):
+                        return accepted
+                    existing = self.candidates.get(candidate.id)
+                    if existing is not None and existing.status == CandidateStatus.rejected:
+                        continue
+                    self.add_candidate(candidate)
+                    accepted += 1
+            with self._ingest_lock:
+                if not self._document_alive(document_id):
+                    return accepted
+                document.status = version.status = DocumentStatus.completed
+                self._persist_document(document, version)
+                self.data_version += 1
+            return accepted
+        except Exception:
+            with self._ingest_lock:
+                if self._document_alive(document_id):
+                    document.status = version.status = DocumentStatus.failed
+                    try:
+                        self._persist_document(document, version)
+                    except Exception:
+                        log.exception("Не удалось сохранить статус failed документа %s", document_id)
+            raise
+
+    def _document_alive(self, document_id: str) -> bool:
+        """Документ существует и не находится в процессе удаления."""
+        return document_id in self.documents and document_id not in self._deleting
+
     def approve_candidate(self, candidate_id: str) -> Fact:
         candidate = self.candidates[candidate_id]
         if candidate.source is None:
@@ -280,6 +397,7 @@ class ApplicationStore:
         self._persist_candidate(candidate)
         self._persist_fact(fact)
         self._project_semantics(fact, candidate)
+        self.data_version += 1
         return fact
 
     def _mark_conflicts(self, fact: Fact) -> None:
@@ -338,6 +456,7 @@ class ApplicationStore:
         candidate.status = CandidateStatus.rejected
         candidate.review_note = note
         self._persist_candidate(candidate)
+        self.data_version += 1
         return candidate
 
     def index_fragments(self, fragments: list[SourceFragment]) -> None:
@@ -369,7 +488,9 @@ class ApplicationStore:
             fragment = self.fragments.get(fragment_id)
             if fragment is None:
                 continue
-            lexical = sum(1 for term in query_terms if term and term in fragment.normalized_text) / max(len(query_terms), 1)
+            # ё→е с обеих сторон: normalized_text парсеров букву ё сохраняет
+            haystack = fragment.normalized_text.replace("ё", "е")
+            lexical = sum(1 for term in query_terms if term and term in haystack) / max(len(query_terms), 1)
             score = semantic * 0.72 + lexical * 0.28
             if score <= 0:
                 continue
@@ -441,7 +562,8 @@ class ApplicationStore:
             rows = self.postgres_sink.list_facts()
             if rows:
                 return rows
-        return [fact.model_dump(mode="json") for fact in self.facts.values()]
+        # Снапшот: ingest-воркеры мутируют facts во время запроса
+        return [fact.model_dump(mode="json") for fact in list(self.facts.values())]
 
     def _fact_from_candidate(self, candidate: ExtractionCandidate) -> Fact:
         payload = candidate.payload
@@ -491,6 +613,12 @@ class ApplicationStore:
             self.postgres_sink.upsert_fact(fact)
         if self.graph_sink:
             self.graph_sink.upsert_fact(fact)
+
+    def persist_ontology_candidate(self, candidate: OntologyCandidate) -> None:
+        """Решение по кандидату онтологии переживает рестарт backend-а."""
+        self.ontology_candidates[candidate.id] = candidate
+        if self.postgres_sink:
+            self.postgres_sink.upsert_ontology_candidate(candidate)
 
 
 def _now() -> str:
@@ -545,20 +673,6 @@ def _normalize_effect_direction(value: Any) -> str:
 
 def _canonical_text(value: str) -> str:
     return " ".join(value.strip().lower().replace("ё", "е").split())
-
-
-def _cosine(left: list[float], right: list[float]) -> float:
-    if not left or not right:
-        return 0.0
-    numerator = sum(a * b for a, b in zip(left, right))
-    left_norm = math.sqrt(sum(a * a for a in left)) or 1.0
-    right_norm = math.sqrt(sum(b * b for b in right)) or 1.0
-    return numerator / (left_norm * right_norm)
-
-
-def _slug(value: str) -> str:
-    cleaned = "".join(char.lower() if char.isalnum() else "-" for char in value.strip())
-    return "-".join(part for part in cleaned.split("-") if part)
 
 
 def _effect_label(fact: Fact) -> str:

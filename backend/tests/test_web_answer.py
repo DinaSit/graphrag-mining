@@ -31,7 +31,8 @@ class WebAnswerTest(unittest.IsolatedAsyncioTestCase):
         try:
             with patch("app.main.orchestrator.answer", AsyncMock(return_value=response)):
                 with patch("app.main.httpx.AsyncClient.post", side_effect=httpx.TimeoutException("timeout")):
-                    result = await ask(QueryRequest(question="q"))
+                    # Вопрос доменный: оффтоп-роутер /ask не должен срезать веб-ступень
+                    result = await ask(QueryRequest(question="какие методы очистки шахтных вод существуют?"))
         finally:
             if old_url is None:
                 os.environ.pop("WEB_ANSWER_URL", None)

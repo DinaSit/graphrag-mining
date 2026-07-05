@@ -178,6 +178,9 @@ class QueryResponse(BaseModel):
     related_sources: list[SourceRef] = Field(default_factory=list)
     related_graph: GraphPayload = Field(default_factory=GraphPayload)
     evidence_status: str = "none"  # direct / partial / none
+    # Вопрос не про базу знаний (смолток/оффтоп): полный пайплайн, включая
+    # LLM, граф и веб-поиск, не запускался — ответ мгновенный
+    offtopic: bool = False
 
 
 class SearchRequest(BaseModel):

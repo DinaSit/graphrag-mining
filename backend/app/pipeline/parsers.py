@@ -35,9 +35,6 @@ except ImportError:  # pragma: no cover
     Presentation = None
 
 
-SUPPORTED_EXTENSIONS = {".csv", ".docm", ".docx", ".json", ".md", ".pdf", ".pptx", ".txt", ".xlsm", ".xlsx"}
-
-
 class Parser(Protocol):
     name: str
 
@@ -47,6 +44,17 @@ class Parser(Protocol):
 
 def normalize_text(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip().lower()
+
+
+def decode_text(content: bytes) -> str:
+    """Легаси-экспорты из лабораторий часто в Windows-1251: сначала строгие
+    кодировки, замена битых байтов — только последний фолбэк."""
+    for encoding in ("utf-8-sig", "cp1251"):
+        try:
+            return content.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return content.decode("utf-8", errors="replace")
 
 
 def split_text_blocks(text: str, max_chars: int = 3500) -> list[str]:
@@ -77,7 +85,7 @@ class PlainTextParser:
     name = "plain-text"
 
     def parse(self, document_id: str, version_id: str, filename: str, content: bytes) -> list[SourceFragment]:
-        text = content.decode("utf-8", errors="replace")
+        text = decode_text(content)
         blocks = split_text_blocks(text)
         return [
             SourceFragment(
@@ -99,10 +107,24 @@ class CsvParser:
     name = "csv"
 
     def parse(self, document_id: str, version_id: str, filename: str, content: bytes) -> list[SourceFragment]:
-        text = content.decode("utf-8-sig", errors="replace")
-        reader = csv.DictReader(io.StringIO(text))
+        text = decode_text(content)
+        reader = csv.reader(io.StringIO(text))
+        header_row = next(reader, None)
+        if header_row is None:
+            return []
+        headers = _unique_headers(header_row)
         fragments: list[SourceFragment] = []
-        for index, row in enumerate(reader, start=1):
+        index = 0
+        for values in reader:
+            if not values:
+                continue
+            index += 1
+            # Дубли заголовков не схлопываются (как в DictReader), а получают
+            # суффикс; колонки сверх заголовка именуются по позиции
+            row: dict[str, str] = {}
+            for column, value in enumerate(values):
+                key = headers[column] if column < len(headers) else f"column_{column + 1}"
+                row[key] = value
             row_text = "; ".join(f"{key}={value}" for key, value in row.items() if value not in (None, ""))
             fragments.append(
                 SourceFragment(
@@ -183,6 +205,23 @@ class XlsxParser:
         return fragments
 
 
+def _page_is_mostly_image(page) -> bool:
+    """Страница считается сканом, если растровые изображения покрывают
+    больше половины её площади — независимо от длины текстового слоя."""
+    try:
+        page_area = float(page.width) * float(page.height)
+        if page_area <= 0:
+            return False
+        covered = sum(
+            max(0.0, float(image["x1"]) - float(image["x0"]))
+            * max(0.0, float(image["bottom"]) - float(image["top"]))
+            for image in page.images
+        )
+        return covered / page_area > 0.5
+    except Exception:
+        return False
+
+
 class PdfParser:
     name = "pdfplumber"
 
@@ -197,9 +236,11 @@ class PdfParser:
             for page_index, page in enumerate(pdf.pages, start=1):
                 text = (page.extract_text() or "").strip()
                 image_b64 = None
-                if not text:
-                    # Страница без текстового слоя (скан/схема): рендерим в PNG,
-                    # извлечение отработает мультимодально по изображению
+                # Порог, а не проверка на пустоту: у скана текстовый слой часто
+                # не пуст (колонтитул, OCR-штамп), но содержимое живёт в картинке.
+                # Длинный колонтитул проходит порог по тексту, поэтому вторым
+                # сигналом служит растр, покрывающий большую часть страницы
+                if len(text) < 40 or _page_is_mostly_image(page):
                     if fitz is not None:
                         if render_doc is None:
                             render_doc = fitz.open(stream=content, filetype="pdf")
@@ -208,7 +249,8 @@ class PdfParser:
                             image_b64 = base64.b64encode(pixmap.tobytes("png")).decode("ascii")
                         except Exception:
                             image_b64 = None
-                    text = f"PDF page {page_index} has no text layer; visual OCR adapter is required."
+                    if not text:
+                        text = f"PDF page {page_index} has no text layer; visual OCR adapter is required."
                 blocks = split_text_blocks(text) or [text]
                 for block_index, block in enumerate(blocks, start=1):
                     metadata = {
@@ -255,7 +297,9 @@ class DocxParser:
 
         fragments: list[SourceFragment] = []
         section = "DOCX evidence unit"
-        paragraph_index = 0
+        # У DOCX нет страниц: адрес фрагмента — единый сквозной номер блока,
+        # общий для абзацев и табличных строк (иначе адреса конфликтуют)
+        block_index = 0
         for paragraph in document.paragraphs:
             text = paragraph.text.strip()
             if not text:
@@ -264,21 +308,20 @@ class DocxParser:
             if style_name.lower().startswith("heading"):
                 section = text[:180]
             for block in split_text_blocks(text):
-                paragraph_index += 1
+                block_index += 1
                 fragments.append(
                     SourceFragment(
-                        id=f"fragment-{document_id}-docx-p{paragraph_index}",
+                        id=f"fragment-{document_id}-docx-p{block_index}",
                         document_id=document_id,
                         version_id=version_id,
-                        # У DOCX нет страниц: адрес фрагмента — сквозной номер блока
-                        page=paragraph_index,
+                        page=block_index,
                         element_type="docx_paragraph",
                         section=section,
                         text=block,
                         normalized_text=normalize_text(block),
                         metadata={
                             "filename": filename,
-                            "paragraph": paragraph_index,
+                            "paragraph": block_index,
                             "style": style_name,
                             "evidence_unit": True,
                             "parser": self.name,
@@ -286,20 +329,19 @@ class DocxParser:
                     )
                 )
 
-        table_row_index = 0
         for table_index, table in enumerate(document.tables, start=1):
             for row_index, row in enumerate(table.rows, start=1):
                 cells = [cell.text.strip().replace("\n", " ") for cell in row.cells if cell.text.strip()]
                 row_text = " | ".join(cells)
                 if not row_text:
                     continue
-                table_row_index += 1
+                block_index += 1
                 fragments.append(
                     SourceFragment(
                         id=f"fragment-{document_id}-docx-t{table_index}-r{row_index}",
                         document_id=document_id,
                         version_id=version_id,
-                        page=table_row_index,
+                        page=block_index,
                         element_type="docx_table_row",
                         section=f"DOCX table {table_index}",
                         text=row_text,
@@ -308,7 +350,7 @@ class DocxParser:
                             "filename": filename,
                             "table": table_index,
                             "row": row_index,
-                            "ordinal": table_row_index,
+                            "ordinal": block_index,
                             "evidence_unit": True,
                             "parser": self.name,
                         },
@@ -399,20 +441,29 @@ class BinaryPlaceholderParser:
         ]
 
 
+# Единственный источник правды по поддерживаемым форматам: и выбор парсера,
+# и проверка расширения идут через этот реестр
+_PARSER_BY_EXTENSION: dict[str, type] = {
+    ".csv": CsvParser,
+    ".xlsx": XlsxParser,
+    ".xlsm": XlsxParser,
+    ".pdf": PdfParser,
+    ".docx": DocxParser,
+    ".docm": DocxParser,
+    ".pptx": PptxParser,
+    ".txt": PlainTextParser,
+    ".md": PlainTextParser,
+    ".json": PlainTextParser,
+}
+
+SUPPORTED_EXTENSIONS = set(_PARSER_BY_EXTENSION)
+
+
 def choose_parser(filename: str) -> Parser:
-    lower = filename.lower()
-    if lower.endswith(".csv"):
-        return CsvParser()
-    if lower.endswith(".xlsx") or lower.endswith(".xlsm"):
-        return XlsxParser()
-    if lower.endswith(".pdf"):
-        return PdfParser()
-    if lower.endswith(".docx") or lower.endswith(".docm"):
-        return DocxParser()
-    if lower.endswith(".pptx"):
-        return PptxParser()
-    if lower.endswith(".txt") or lower.endswith(".md") or lower.endswith(".json"):
-        return PlainTextParser()
+    parser_class = _PARSER_BY_EXTENSION.get(extension_of(filename))
+    if parser_class is not None:
+        return parser_class()
+    # Неизвестный формат намеренно регистрируется placeholder-фрагментом
     return BinaryPlaceholderParser(reason=f"unsupported extension {extension_of(filename) or '<none>'}")
 
 
@@ -423,6 +474,17 @@ def extension_of(filename: str) -> str:
 
 def is_supported_file(filename: str) -> bool:
     return extension_of(filename) in SUPPORTED_EXTENSIONS
+
+
+def _unique_headers(raw: list[str]) -> list[str]:
+    headers: list[str] = []
+    seen: dict[str, int] = {}
+    for index, value in enumerate(raw):
+        name = (value or "").strip() or f"column_{index + 1}"
+        count = seen.get(name, 0) + 1
+        seen[name] = count
+        headers.append(name if count == 1 else f"{name}_{count}")
+    return headers
 
 
 def _slug_id(value: str) -> str:

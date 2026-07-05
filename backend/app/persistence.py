@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 from typing import Any
 
 from app.schemas import (
@@ -12,6 +14,7 @@ from app.schemas import (
     GraphEdge,
     GraphNode,
     GraphPayload,
+    OntologyCandidate,
     SourceFragment,
     SourceRef,
 )
@@ -25,6 +28,12 @@ try:
     from neo4j import GraphDatabase
 except ImportError:  # pragma: no cover
     GraphDatabase = None
+
+log = logging.getLogger(__name__)
+
+# Маркер строк-кандидатов онтологии в таблице ontology_versions: она хранит
+# и версии конфигурации, и решения по кандидатам новых типов
+ONTOLOGY_CANDIDATE_KIND = "ontology-candidate"
 
 
 class PostgresSink:
@@ -142,6 +151,7 @@ class PostgresSink:
             return document, version
         except Exception as exc:  # pragma: no cover - integration-only path
             self.last_error = str(exc)
+            log.error("PostgreSQL: поиск документа по checksum не выполнен: %s", exc)
             return None
 
     def upsert_fragments(self, fragments: list[SourceFragment]) -> None:
@@ -269,6 +279,9 @@ class PostgresSink:
     def ensure_schema(self) -> None:
         if not self.enabled:
             return
+        # Размерность векторов задаёт модель эмбеддингов (EMBEDDING_DIM тот же,
+        # что читает провайдер); дефолт 64 — детерминированный hash-эмбеддер
+        dim = int(os.environ.get("EMBEDDING_DIM", "64"))
         statements = [
             "ALTER TABLE documents ADD COLUMN IF NOT EXISTS storage_bucket VARCHAR(256)",
             "ALTER TABLE documents ADD COLUMN IF NOT EXISTS storage_object VARCHAR(1024)",
@@ -276,18 +289,18 @@ class PostgresSink:
             "ALTER TABLE facts ADD COLUMN IF NOT EXISTS conflicts_with JSONB NOT NULL DEFAULT '[]'::jsonb",
             # Индекс векторного поиска: близость считает PostgreSQL, а не backend
             "CREATE INDEX IF NOT EXISTS fragment_vectors_embedding_idx ON fragment_vectors USING hnsw (embedding vector_cosine_ops)",
-            # Совместимость с базами, созданными на прежних моделях эмбеддингов
-            # (deterministic-hash 64, Yandex v2 256): несовместимые векторы
-            # вычищаются, колонка приводится к bge-m3 (1024); переиндексацию
-            # выполняет hydrate при старте. На vector(1024) блок ничего не делает.
-            """
+            # Смена модели эмбеддингов меняет размерность: несовместимые векторы
+            # вычищаются, колонка приводится к текущей EMBEDDING_DIM; переиндексацию
+            # выполняет hydrate при старте. При совпадении типа блок ничего не
+            # делает — существующие векторы сохраняются.
+            f"""
             DO $$
             BEGIN
                 IF (SELECT format_type(atttypid, atttypmod) FROM pg_attribute
                     WHERE attrelid = 'fragment_vectors'::regclass
-                      AND attname = 'embedding') <> 'vector(1024)' THEN
+                      AND attname = 'embedding') <> 'vector({dim})' THEN
                     TRUNCATE fragment_vectors;
-                    ALTER TABLE fragment_vectors ALTER COLUMN embedding TYPE vector(1024);
+                    ALTER TABLE fragment_vectors ALTER COLUMN embedding TYPE vector({dim});
                 END IF;
             END $$;
             """,
@@ -301,7 +314,12 @@ class PostgresSink:
         try:
             with psycopg.connect(self.database_url) as connection:
                 with connection.cursor() as cursor:
-                    cursor.execute("SELECT id, material, property, status, confidence, source FROM facts ORDER BY id")
+                    cursor.execute(
+                        """
+                        SELECT id, material, property, status, confidence, is_hypothesis, conflicts_with, source
+                        FROM facts ORDER BY id
+                        """
+                    )
                     return [
                         {
                             "id": row[0],
@@ -309,12 +327,15 @@ class PostgresSink:
                             "property": row[2],
                             "status": row[3],
                             "confidence": row[4],
-                            "source": row[5],
+                            "is_hypothesis": row[5],
+                            "conflicts_with": row[6] or [],
+                            "source": row[7],
                         }
                         for row in cursor.fetchall()
                     ]
         except Exception as exc:  # pragma: no cover - integration-only path
             self.last_error = str(exc)
+            log.error("PostgreSQL: чтение facts не выполнено: %s", exc)
             return []
 
     def delete_document_data(self, document_id: str) -> None:
@@ -323,14 +344,33 @@ class PostgresSink:
             return
         statements = [
             "DELETE FROM fragment_vectors WHERE fragment_id IN (SELECT id FROM source_fragments WHERE document_id = %s)",
-            "DELETE FROM extraction_candidates WHERE source->>'document_id' = %s",
+            # facts ссылаются на extraction_candidates по FK — удаляются первыми
             "DELETE FROM facts WHERE source->>'document_id' = %s",
+            "DELETE FROM extraction_candidates WHERE source->>'document_id' = %s",
             "DELETE FROM source_fragments WHERE document_id = %s",
             "DELETE FROM document_versions WHERE document_id = %s",
             "DELETE FROM documents WHERE id = %s",
         ]
         for statement in statements:
             self._execute(statement, (document_id,))
+
+    def upsert_ontology_candidate(self, candidate: OntologyCandidate) -> None:
+        """Фиксирует решение инженера знаний по кандидату нового типа онтологии."""
+        if not self.enabled:
+            return
+        self._execute(
+            """
+            INSERT INTO ontology_versions (id, version, status, config)
+            VALUES (%s, %s, %s, %s::jsonb)
+            ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status, config = EXCLUDED.config
+            """,
+            (
+                candidate.id,
+                ONTOLOGY_CANDIDATE_KIND,
+                candidate.status.value if isinstance(candidate.status, CandidateStatus) else candidate.status,
+                json.dumps(candidate.model_dump(mode="json"), ensure_ascii=False),
+            ),
+        )
 
     def upsert_job(self, job_id: str, job_type: str, status: str, payload: dict, error: str | None = None) -> None:
         if not self.enabled:
@@ -357,6 +397,7 @@ class PostgresSink:
             return {"job_id": row[0], "job_type": row[1], "status": row[2], "payload": row[3], "error": row[4]}
         except Exception as exc:  # pragma: no cover - integration-only path
             self.last_error = str(exc)
+            log.error("PostgreSQL: чтение статуса job %s не выполнено: %s", job_id, exc)
             return None
 
     def search_vectors(self, query_vector: list[float], top_k: int) -> list[tuple[str, float]]:
@@ -379,10 +420,15 @@ class PostgresSink:
                     return [(row[0], float(row[1])) for row in cursor.fetchall()]
         except Exception as exc:  # pragma: no cover - integration-only path
             self.last_error = str(exc)
+            log.error("PostgreSQL: векторный поиск не выполнен: %s", exc)
             return []
 
     def load_state(self) -> dict[str, dict[str, Any]]:
-        """Загружает сохранённое состояние для восстановления ApplicationStore после рестарта."""
+        """Загружает сохранённое состояние для восстановления ApplicationStore после рестарта.
+
+        Ошибка загрузки пробрасывается: частичное состояние опаснее падения —
+        оно выглядит как рабочая система с молча потерянными фактами.
+        """
         state: dict[str, dict[str, Any]] = {
             "documents": {},
             "versions": {},
@@ -390,6 +436,7 @@ class PostgresSink:
             "candidates": {},
             "facts": {},
             "vectors": {},
+            "ontology_candidates": {},
         }
         if not self.enabled:
             return state
@@ -510,8 +557,17 @@ class PostgresSink:
                     cursor.execute("SELECT fragment_id, embedding FROM fragment_vectors WHERE embedding IS NOT NULL")
                     for row in cursor.fetchall():
                         state["vectors"][row[0]] = json.loads(str(row[1]))
-        except Exception as exc:  # pragma: no cover - integration-only path
+
+                    cursor.execute(
+                        "SELECT id, config FROM ontology_versions WHERE version = %s",
+                        (ONTOLOGY_CANDIDATE_KIND,),
+                    )
+                    for row in cursor.fetchall():
+                        state["ontology_candidates"][row[0]] = OntologyCandidate(**(row[1] or {}))
+        except Exception as exc:
             self.last_error = str(exc)
+            log.error("PostgreSQL: восстановление состояния не выполнено: %s", exc)
+            raise
         return state
 
     def _execute(self, query: str, params: tuple[Any, ...]) -> None:
@@ -525,8 +581,13 @@ class PostgresSink:
                 with connection.cursor() as cursor:
                     cursor.executemany(query, rows)
                 connection.commit()
-        except Exception as exc:  # pragma: no cover - integration-only path
+            self.last_error = None
+        except Exception as exc:
+            # Потеря записи недопустима: вызывающий слой (ingest, delete)
+            # обязан пометить операцию как failed, а не «успешно» без данных
             self.last_error = str(exc)
+            log.error("PostgreSQL: запись не выполнена: %s", exc)
+            raise
 
 
 class Neo4jSink:
@@ -535,10 +596,40 @@ class Neo4jSink:
         self.user = user
         self.password = password
         self.last_error: str | None = None
+        self._driver = None
+        self._constraints_applied = False
+        if self.enabled:
+            # Недоступность Neo4j на старте не валит backend: constraints
+            # доприменятся перед первой успешной записью
+            try:
+                self._ensure_constraints()
+            except Exception as exc:
+                log.error("Neo4j: constraints при старте не применены: %s", exc)
 
     @property
     def enabled(self) -> bool:
         return bool(self.uri and self.user and self.password and GraphDatabase is not None)
+
+    def _get_driver(self):
+        # Один драйвер на процесс: драйвер держит пул соединений и потокобезопасен,
+        # создание нового на каждый запрос — лавина TCP-сессий под нагрузкой
+        if self._driver is None:
+            self._driver = GraphDatabase.driver(self.uri, auth=(self.user, self.password))
+        return self._driver
+
+    def _ensure_constraints(self) -> None:
+        """Уникальность id для всех меток онтологии: без constraint конкурентные
+        MERGE двух воркеров создают дубликаты узлов, а MATCH по id идёт сканом."""
+        if self._constraints_applied:
+            return
+        labels = sorted(self.ONTOLOGY_LABELS | {"Claim", "SourceFragment", "Effect", "Laboratory"})
+        with self._get_driver().session() as session:
+            for label in labels:
+                session.run(
+                    f"CREATE CONSTRAINT {_slug(label)}_id IF NOT EXISTS "
+                    f"FOR (n:{label}) REQUIRE n.id IS UNIQUE"
+                )
+        self._constraints_applied = True
 
     def upsert_fact(self, fact: Fact) -> None:
         if not self.enabled:
@@ -640,12 +731,12 @@ class Neo4jSink:
             return []
         rows: list[dict] = []
         try:
-            with GraphDatabase.driver(self.uri, auth=(self.user, self.password)) as driver:
-                with driver.session() as session:
-                    for record in session.run(query, **params):
-                        rows.append(dict(record))
+            with self._get_driver().session() as session:
+                for record in session.run(query, **params):
+                    rows.append(dict(record))
         except Exception as exc:  # pragma: no cover - integration-only path
             self.last_error = str(exc)
+            log.error("Neo4j: чтение не выполнено: %s", exc)
         return rows
 
     def delete_document(self, document_id: str, claim_ids: list[str]) -> None:
@@ -668,34 +759,57 @@ class Neo4jSink:
         RETURN a, type(r) AS rel, b
         LIMIT $limit
         """
+        return self._read_graph(query, {"limit": limit})
+
+    def get_entity_graph(self, entity_id: str, depth: int = 2) -> GraphPayload:
+        """Окрестность сущности: все связи между узлами в радиусе depth."""
+        if not self.enabled:
+            return GraphPayload()
+        # Глубина подставляется в текст запроса (Cypher не параметризует длину
+        # пути), поэтому ограничивается явным диапазоном
+        depth = max(1, min(int(depth), 5))
+        query = (
+            f"MATCH (n {{id: $entity_id}})-[*1..{depth}]-(m) "
+            "WITH collect(DISTINCT n) + collect(DISTINCT m) AS ns "
+            "UNWIND ns AS a MATCH (a)-[r]->(b) WHERE b IN ns "
+            "RETURN DISTINCT a, type(r) AS rel, b LIMIT $limit"
+        )
+        return self._read_graph(query, {"entity_id": entity_id, "limit": 200})
+
+    def _read_graph(self, query: str, params: dict[str, Any]) -> GraphPayload:
         nodes: dict[str, GraphNode] = {}
         edges: dict[str, GraphEdge] = {}
         try:
-            with GraphDatabase.driver(self.uri, auth=(self.user, self.password)) as driver:
-                with driver.session() as session:
-                    for record in session.run(query, limit=limit):
-                        left = record["a"]
-                        right = record["b"]
-                        rel = record["rel"]
-                        left_id = left.get("id")
-                        right_id = right.get("id")
-                        if not left_id or not right_id:
-                            continue
-                        nodes[left_id] = _node_from_neo4j(left)
-                        nodes[right_id] = _node_from_neo4j(right)
-                        edge_id = f"{left_id}-{rel}-{right_id}"
-                        edges[edge_id] = GraphEdge(id=edge_id, source=left_id, target=right_id, label=rel)
+            with self._get_driver().session() as session:
+                for record in session.run(query, **params):
+                    left = record["a"]
+                    right = record["b"]
+                    rel = record["rel"]
+                    left_id = left.get("id")
+                    right_id = right.get("id")
+                    if not left_id or not right_id:
+                        continue
+                    nodes[left_id] = _node_from_neo4j(left)
+                    nodes[right_id] = _node_from_neo4j(right)
+                    edge_id = f"{left_id}-{rel}-{right_id}"
+                    edges[edge_id] = GraphEdge(id=edge_id, source=left_id, target=right_id, label=rel)
         except Exception as exc:  # pragma: no cover - integration-only path
             self.last_error = str(exc)
+            log.error("Neo4j: чтение графа не выполнено: %s", exc)
         return GraphPayload(nodes=list(nodes.values()), edges=list(edges.values()))
 
     def _write(self, query: str, params: dict[str, Any]) -> None:
         try:
-            with GraphDatabase.driver(self.uri, auth=(self.user, self.password)) as driver:
-                with driver.session() as session:
-                    session.run(query, **params)
-        except Exception as exc:  # pragma: no cover - integration-only path
+            self._ensure_constraints()
+            with self._get_driver().session() as session:
+                session.run(query, **params)
+            self.last_error = None
+        except Exception as exc:
+            # Расхождение графа с PostgreSQL недопустимо: вызывающий слой
+            # обязан пометить операцию failed, а не отчитаться об успехе
             self.last_error = str(exc)
+            log.error("Neo4j: запись не выполнена: %s", exc)
+            raise
 
 
 def _normalize_database_url(value: str | None) -> str | None:

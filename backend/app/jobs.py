@@ -11,7 +11,6 @@ import queue
 import threading
 from uuid import uuid4
 
-from app.schemas import DocumentStatus
 from app.storage import ApplicationStore
 
 log = logging.getLogger(__name__)
@@ -21,6 +20,10 @@ class IngestQueue:
     def __init__(self, store: ApplicationStore, workers: int = 2):
         self.store = store
         self.tasks: queue.Queue[dict] = queue.Queue()
+        # Источник статусов — память процесса: GET /jobs работает и без
+        # PostgreSQL; таблица jobs — персистентная копия на случай рестарта
+        self.jobs: dict[str, dict] = {}
+        self._jobs_lock = threading.Lock()
         for index in range(workers):
             threading.Thread(target=self._worker, name=f"ingest-worker-{index}", daemon=True).start()
 
@@ -37,6 +40,11 @@ class IngestQueue:
 
     def enqueue_reprocess(self, document_id: str) -> str:
         return self._enqueue({"kind": "reprocess", "document_id": document_id})
+
+    def get_job(self, job_id: str) -> dict | None:
+        with self._jobs_lock:
+            job = self.jobs.get(job_id)
+            return dict(job) if job else None
 
     def _enqueue(self, task: dict) -> str:
         job_id = f"job-{uuid4().hex[:10]}"
@@ -57,7 +65,7 @@ class IngestQueue:
                         task["source_label"], task["access_level"],
                     )
                 else:
-                    self._reprocess(task["document_id"])
+                    self.store.reprocess_document(task["document_id"])
                 self._record(job_id, task, "completed")
             except Exception as exc:
                 log.exception("Фоновая задача %s (%s) упала", job_id, task["kind"])
@@ -65,24 +73,14 @@ class IngestQueue:
             finally:
                 self.tasks.task_done()
 
-    def _reprocess(self, document_id: str) -> None:
-        document = self.store.documents[document_id]
-        version = self.store.versions[document.current_version_id]
-        fragments = [f for f in self.store.fragments.values() if f.document_id == document_id]
-        document.status = version.status = DocumentStatus.processing
-        document.element_count = len(fragments)
-        self.store._persist_document(document, version)
-        try:
-            for candidate in self.store.llm.extract_entities(fragments):
-                self.store.add_candidate(candidate)
-            document.status = version.status = DocumentStatus.completed
-            self.store._persist_document(document, version)
-        except Exception:
-            document.status = version.status = DocumentStatus.failed
-            self.store._persist_document(document, version)
-            raise
-
     def _record(self, job_id: str, task: dict, status: str, error: str | None = None) -> None:
+        with self._jobs_lock:
+            self.jobs[job_id] = {"job_id": job_id, "status": status, "error": error}
         if self.store.postgres_sink:
             payload = {"filename": task.get("filename"), "document_id": task.get("document_id")}
-            self.store.postgres_sink.upsert_job(job_id, task["kind"], status, payload, error)
+            try:
+                self.store.postgres_sink.upsert_job(job_id, task["kind"], status, payload, error)
+            except Exception:
+                # Статус в памяти остаётся источником: недоступность PG
+                # не должна ронять воркер и терять саму задачу
+                log.exception("Статус job %s не сохранён в PostgreSQL", job_id)

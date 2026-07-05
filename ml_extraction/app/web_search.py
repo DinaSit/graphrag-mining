@@ -70,11 +70,15 @@ def _query_hits(query: str, max_results: int) -> list[dict]:
 def _search(question: str) -> list[dict]:
     site_filter = " OR ".join(f"site:{domain}" for domain in ALLOWED_DOMAINS)
     simplified = _simplify(question)
+    # Если упрощение съело все слова (короткий вопрос из стоп-слов), в запрос
+    # с site-фильтром идёт исходный вопрос: чистый фильтр без ключевых слов
+    # вернул бы случайные страницы разрешённых доменов
+    keywords = simplified or question.strip()
     # Сначала короткий предметный запрос: длинный полный вопрос с OR-фильтром
     # часто раздувает URL и замедляет выдачу. Домен всё равно проверяется ниже.
     attempts = [
         simplified,
-        f"{simplified} ({site_filter})",
+        f"{keywords} ({site_filter})",
         question,
     ]
     for query in attempts:
@@ -117,12 +121,15 @@ async def answer_from_web(question: str) -> dict:
     snippets = "\n".join(f"- {h.get('title', '')}: {h.get('body', '')} ({h.get('href', '')})" for h in hits)
     try:
         llm_timeout = float(os.getenv("WEB_LLM_TIMEOUT", "8"))
+        # deadline режет ретраи и делит бюджет между каскадом Яндекс→запасной;
+        # wait_for — внешняя страховка с запасом, чтобы не отменить ответ
+        # фолбэка, пришедший на границе бюджета
         data = await asyncio.wait_for(
             yandex_client.chat_json([{
                 "role": "user",
                 "content": _ANSWER_PROMPT.format(question=question, snippets=snippets),
-            }], allow_fallback=True),
-            timeout=llm_timeout,
+            }], allow_fallback=True, deadline=llm_timeout),
+            timeout=llm_timeout + 2,
         )
     except (asyncio.TimeoutError, yandex_client.YandexClientError, json.JSONDecodeError, ValueError) as exc:
         message = "LLM-сводка веб-результатов не уложилась в таймаут" if isinstance(exc, asyncio.TimeoutError) else str(exc)

@@ -81,7 +81,9 @@ CREATE TABLE IF NOT EXISTS facts (
 CREATE TABLE IF NOT EXISTS fragment_vectors (
     fragment_id VARCHAR(96) PRIMARY KEY REFERENCES source_fragments(id),
     embedding_model VARCHAR(128) NOT NULL,
-    embedding vector(1024),
+    -- Размерность соответствует дефолтному hash-эмбеддеру; при другой модели
+    -- ensure_schema приводит колонку к EMBEDDING_DIM на старте backend
+    embedding vector(64),
     vector_metadata JSONB NOT NULL DEFAULT '{}'::jsonb
 );
 

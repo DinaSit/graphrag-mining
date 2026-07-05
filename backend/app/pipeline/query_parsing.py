@@ -40,7 +40,7 @@ SYSTEM_PROMPT = f"""Ты — Query Planner для GraphRAG-системы гор
 
 
 class LLMQuestionParser:
-    """Реальный Query Planner поверх chat_json. Используется вместо store.llm.parse_question."""
+    """Query Planner поверх chat_json: единственный разборщик вопросов в системе."""
 
     def __init__(self, normalizer=None, model: str | None = None):
         self.normalizer = normalizer

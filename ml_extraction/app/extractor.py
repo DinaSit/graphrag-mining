@@ -13,15 +13,24 @@ _REQUIRED_STR_FIELDS = ("material", "experiment_id", "sample", "process", "prope
 _EFFECT_DIRECTIONS = {"increase", "decrease", "neutral", "unknown"}
 
 
+# Отказы провайдера, при которых продолжать батч бессмысленно: остальные
+# фрагменты упадут так же, а backend должен пометить документ failed (HTTP 502),
+# а не completed с молча потерянными фактами
+_FATAL_KINDS = {"auth", "quota", "unavailable"}
+
+
 async def extract_fragments(fragments: list[SourceFragment]) -> list[ExtractionCandidate]:
     # Параллельность ограничивает глобальный семафор в yandex_client:
     # суммарный лимит держится и при нескольких одновременных батчах
     results = await asyncio.gather(*(_extract_one(f) for f in fragments), return_exceptions=True)
     candidates: list[ExtractionCandidate] = []
     for fragment, result in zip(fragments, results):
-        if isinstance(result, Exception):
-            # ошибка обработки фрагмента изолируется и логируется, батч продолжается
-            log.error("Ошибка извлечения на фрагменте %s: %s", fragment.id, result)
+        if isinstance(result, yandex_client.YandexClientError) and result.kind in _FATAL_KINDS:
+            raise result
+        if isinstance(result, BaseException):
+            # локальная проблема фрагмента (кривой JSON, мусорный ответ модели)
+            # изолируется и логируется, батч продолжается
+            log.warning("Фрагмент %s пропущен: %s", fragment.id, result)
             continue
         candidates.extend(result)
     return candidates
@@ -120,6 +129,11 @@ def _normalize_claim(claim: dict) -> dict | None:
 
     if out.get("effect_direction") not in _EFFECT_DIRECTIONS:
         out["effect_direction"] = "unknown"
+
+    # Нестроковый quote (модель вернула число/объект) заменяется на None:
+    # источник подставит текст фрагмента
+    if not isinstance(out.get("quote"), str):
+        out["quote"] = None
 
     confidence = _float_or_none(out.get("confidence"))
     out["confidence"] = min(max(confidence, 0.0), 1.0) if confidence is not None else 0.5

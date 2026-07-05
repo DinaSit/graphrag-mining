@@ -1,1 +1,1 @@
-"""Pipeline interfaces and mock-first implementations."""
+"""Пайплайн инжеста и запросов: парсеры, провайдеры, валидация чисел, оркестратор."""

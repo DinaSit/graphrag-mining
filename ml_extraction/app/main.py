@@ -36,7 +36,12 @@ async def chat_json_endpoint(request: dict) -> dict:
     if not messages:
         raise HTTPException(status_code=422, detail="messages обязательны")
     try:
-        result = await yandex_client.chat_json(messages, model=request.get("model"), allow_fallback=True)
+        # CHAT_DEADLINE < 120 с (таймаут httpx в backend/llm_bridge): каскад
+        # Яндекс→запасной обязан ответить до обрыва соединения вызывающей стороной
+        result = await yandex_client.chat_json(
+            messages, model=request.get("model"), allow_fallback=True,
+            deadline=config.CHAT_DEADLINE,
+        )
     except YandexClientError as e:
         # kind даёт backend-у различить причину: auth / quota / bad_response / unavailable
         raise HTTPException(status_code=502, detail={"kind": e.kind, "message": str(e)}) from e
@@ -58,6 +63,7 @@ async def web_answer(request: WebAnswerRequest) -> WebAnswerResponse:
 
 @app.get("/health")
 def health() -> dict:
+    query_model = yandex_client.query_model_status()
     return {
         "status": "ok",
         "service": "ml-extraction",
@@ -65,6 +71,11 @@ def health() -> dict:
         "model": config.model_uri(config.YANDEX_MODEL),
         "fallback_model": config.FALLBACK_MODEL if config.FALLBACK_BASE_URL else None,
         "configured": bool(config.YANDEX_API_KEY),
+        "query_llm_status": query_model.get("status"),
+        "query_llm_provider": query_model.get("provider"),
+        "query_llm_model": query_model.get("model"),
+        "query_llm_error_kind": query_model.get("error_kind"),
+        "query_llm_updated_at": query_model.get("updated_at"),
     }
 
 
@@ -75,7 +86,9 @@ async def extract(request: ExtractRequest) -> ExtractResponse:
     try:
         candidates = await extract_fragments(request.fragments)
     except YandexClientError as e:
-        raise HTTPException(status_code=502, detail=str(e)) from e
+        # Фатальный отказ провайдера (auth/quota/недоступность): backend пометит
+        # документ failed вместо completed без фактов
+        raise HTTPException(status_code=502, detail={"kind": e.kind, "message": str(e)}) from e
     return ExtractResponse(candidates=candidates)
 
 

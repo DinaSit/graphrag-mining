@@ -6,11 +6,6 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from pint import UnitRegistry
-except ImportError:  # pragma: no cover - bundled smoke tests can run without optional deps
-    UnitRegistry = None
-
-try:
     import yaml
 except ImportError:  # pragma: no cover
     yaml = None
@@ -22,7 +17,6 @@ def load_validation_rules(domain_dir: Path) -> dict[str, Any]:
     """
     rules: dict[str, Any] = {
         "thresholds": {},
-        "ranges_by_quantity": {},
         "ranges_by_name": {},
         "quantity_by_name": {},
     }
@@ -34,26 +28,55 @@ def load_validation_rules(domain_dir: Path) -> dict[str, Any]:
     for name, spec in (data.get("params") or {}).items():
         if not isinstance(spec, dict) or "min" not in spec or "max" not in spec:
             continue
-        low, high = float(spec["min"]), float(spec["max"])
-        rules["ranges_by_name"][name.lower()] = (low, high)
-        # По виду величины диапазоны разных параметров объединяются:
-        # это грубая проверка «температура 99999 °C нереальна», точная — по имени
+        rules["ranges_by_name"][name.lower()] = (float(spec["min"]), float(spec["max"]))
         quantity = spec.get("quantity")
         if quantity:
             rules["quantity_by_name"][name.lower()] = quantity
-            merged = rules["ranges_by_quantity"].get(quantity)
-            rules["ranges_by_quantity"][quantity] = (
-                min(low, merged[0]) if merged else low,
-                max(high, merged[1]) if merged else high,
-            )
     return rules
 
 
+# Составные единицы идут раньше однобуквенных: иначе «м» съедает начало «м/с».
+# Однобуквенные различаются регистром: «С» — Цельсий, «с» — секунды,
+# «В» — вольты, строчное «в» — предлог и единицей не считается.
+_UNITS = (
+    r"кВт·ч/т|kWh/t|мг/дм3|мг/дм³|mg/dm3|mg/dm³|г/дм3|г/дм³|g/dm3|g/dm³|м3/ч|м³/ч|m3/h|"
+    r"A/m2|А/м²|А/м2|мСм/см|mS/cm|мг/л|mg/l|г/л|g/l|г/т|g/t|м/с|m/s|MPa|МПа|bar|бар|atm|атм|ppm|kgf|кгс|"
+    r"т/сут(?:ки)?|t/day|т/ч|t/h|час(?:ами|а|ов)?|мин(?:ут(?:ами|а|ы|у)?)?|min|сек(?:унд(?:ами|а|ы|у)?)?|sec|"
+    r"мкм|μm|um|mm|мм|mV|мВ|NTU|%|°\s*[CcСс]|h|ч|m|м|"
+    r"(?-i:[CС])|(?-i:[sс])|(?-i:[VВ])"
+)
+
+# Число: допускает разделители тысяч пробелом («12 000») и десятичную запятую
+_NUM_CORE = r"(?:\d{1,3}(?:[   ]\d{3})+|\d+)(?:[.,]\d+)?"
+# Минус встречается и как U+2212, и как en-dash в PDF-копиях
+_SIGN = r"[+\-−–]?"
+# Слева от числа не должно быть букв, цифр и дефисов: это отсекает хвосты
+# диапазонов («700-750» не даёт −750) и куски слов/кодов («EXP-001»)
+_BOUND = r"(?<![\w.,+\-−–—])"
+# После единицы — граница слова: «30 с при» — секунды, «2 части» — не часы
+_TAIL = r"(?![0-9A-Za-zА-Яа-яЁё])"
+
 NUMBER_UNIT_RE = re.compile(
-    r"(?P<value>[+-]?\d+(?:[.,]\d+)?)\s*(?P<unit>кВт·ч/т|kWh/t|мг/дм3|мг/дм³|mg/dm3|mg/dm³|г/дм3|г/дм³|g/dm3|g/dm³|м3/ч|м³/ч|m3/h|A/m2|А/м²|А/м2|мСм/см|mS/cm|мг/л|mg/l|г/л|g/l|г/т|g/t|м/с|m/s|MPa|МПа|bar|бар|atm|атм|ppm|kgf|кгс|час(?:а|ов)?|мкм|μm|um|mm|мм|mV|мВ|NTU|h|ч|%|°\s*C|°\s*С|C|С|т/ч|t/h|V|В|m|м)",
+    _BOUND + r"(?P<value>" + _SIGN + _NUM_CORE + r")\s*(?P<unit>" + _UNITS + r")" + _TAIL,
     re.IGNORECASE,
 )
-PH_RE = re.compile(r"pH\s*[=:]?\s*(?P<value>[+-]?\d+(?:[.,]\d+)?)", re.IGNORECASE)
+# Диапазоны «700-750 °C», «200...300 мг/л» разбираются отдельным проходом
+# до одиночных чисел: единица приписывается обоим концам
+RANGE_RE = re.compile(
+    _BOUND
+    + r"(?P<value1>" + _SIGN + _NUM_CORE + r")"
+    + r"\s*(?:\.{2,3}|…|[\-−–—])\s*"
+    + r"(?P<value2>" + _SIGN + _NUM_CORE + r")"
+    + r"\s*(?P<unit>" + _UNITS + r")" + _TAIL,
+    re.IGNORECASE,
+)
+# «рН» в русских отчётах пишется кириллицей, встречаются и смешанные написания;
+# диапазон «pH 4-6» даёт оба конца
+PH_RE = re.compile(
+    r"(?<![A-Za-zА-Яа-яЁё])[pр][hн]\s*[=:]?\s*(?P<value>[+\-−]?\d+(?:[.,]\d+)?)"
+    r"(?:\s*(?:\.{2,3}|…|[\-−–—])\s*(?P<value2>\d+(?:[.,]\d+)?))?",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -90,6 +113,7 @@ _UNIT_SPECS: dict[str, UnitSpec] = {
     "час": UnitSpec("duration", "h", "duration", 1.0),
     "часа": UnitSpec("duration", "h", "duration", 1.0),
     "часов": UnitSpec("duration", "h", "duration", 1.0),
+    "часами": UnitSpec("duration", "h", "duration", 1.0),
     "%": UnitSpec("relative_effect", "%", "relative_effect", 1.0),
     "м3/ч": UnitSpec("flow_rate", "m3/h", "flow_rate", 1.0),
     "м³/ч": UnitSpec("flow_rate", "m3/h", "flow_rate", 1.0),
@@ -140,7 +164,17 @@ _UNIT_SPECS: dict[str, UnitSpec] = {
     "ntu": UnitSpec("turbidity", "NTU", "turbidity", 1.0),
     "ms/cm": UnitSpec("conductivity", "mS/cm", "conductivity", 1.0),
     "мсм/см": UnitSpec("conductivity", "mS/cm", "conductivity", 1.0),
+    "ph": UnitSpec("dimensionless", "pH", "dimensionless", 1.0),
 }
+
+# Минуты и секунды приводятся к часам; т/сут — к т/ч
+for _alias in ("мин", "минут", "минута", "минуты", "минуту", "минутами", "min"):
+    _UNIT_SPECS[_alias] = UnitSpec("duration", "h", "duration", 1.0 / 60.0)
+for _alias in ("сек", "секунд", "секунда", "секунды", "секунду", "секундами", "sec", "s"):
+    _UNIT_SPECS[_alias] = UnitSpec("duration", "h", "duration", 1.0 / 3600.0)
+for _alias in ("т/сут", "т/сутки", "t/day"):
+    _UNIT_SPECS[_alias] = UnitSpec("mass_flow", "t/h", "mass_flow", 1.0 / 24.0)
+del _alias
 
 
 _TARGET_QUANTITIES: dict[str, TargetQuantity] = {
@@ -160,6 +194,7 @@ _TARGET_QUANTITIES: dict[str, TargetQuantity] = {
     "current_density": TargetQuantity("current_density", "A/m2", 1.0),
     "specific_energy": TargetQuantity("specific_energy", "kWh/t", 1.0),
     "mass_flow": TargetQuantity("mass_flow", "t/h", 1.0),
+    "velocity": TargetQuantity("velocity", "m/s", 1.0),
     "concentration": TargetQuantity("concentration", "mg/L", 1.0),
     "concentration_high": TargetQuantity("concentration", "g/L", 0.001),
     "concentration_trace": TargetQuantity("concentration_trace", "g/t", 1.0),
@@ -171,23 +206,54 @@ _TARGET_QUANTITIES: dict[str, TargetQuantity] = {
 
 def extract_quantity_hits(text: str) -> list[QuantityHit]:
     hits: list[QuantityHit] = []
-    for match in NUMBER_UNIT_RE.finditer(text):
-        raw_value = float(match.group("value").replace(",", "."))
+    consumed: list[tuple[int, int]] = []
+    for match in RANGE_RE.finditer(text):
+        consumed.append(match.span())
         raw_unit = match.group("unit").replace(" ", "")
-        kind, normalized_value, normalized_unit = normalize_quantity(raw_value, raw_unit)
-        hits.append(
-            QuantityHit(
-                value=raw_value,
-                unit=raw_unit,
-                kind=kind,
-                normalized_value=normalized_value,
-                normalized_unit=normalized_unit,
-            )
-        )
+        hits.append(_make_hit(match.group("value1"), raw_unit))
+        hits.append(_make_hit(match.group("value2"), raw_unit))
+    for match in NUMBER_UNIT_RE.finditer(text):
+        start, end = match.span()
+        # Куски уже разобранных диапазонов вторым проходом не трогаем
+        if any(start < c_end and c_start < end for c_start, c_end in consumed):
+            continue
+        hits.append(_make_hit(match.group("value"), match.group("unit").replace(" ", "")))
     for match in PH_RE.finditer(text):
-        raw_value = float(match.group("value").replace(",", "."))
+        raw_value = _parse_number(match.group("value"))
         hits.append(QuantityHit(raw_value, "pH", "dimensionless", raw_value, "pH"))
+        if match.group("value2"):
+            second = _parse_number(match.group("value2"))
+            hits.append(QuantityHit(second, "pH", "dimensionless", second, "pH"))
     return hits
+
+
+def _make_hit(raw_value: str, raw_unit: str) -> QuantityHit:
+    value = _parse_number(raw_value)
+    unit = _resolve_unit_alias(raw_unit)
+    kind, normalized_value, normalized_unit = normalize_quantity(value, unit)
+    return QuantityHit(
+        value=value,
+        unit=unit,
+        kind=kind,
+        normalized_value=normalized_value,
+        normalized_unit=normalized_unit,
+    )
+
+
+def _parse_number(raw: str) -> float:
+    cleaned = raw.replace("−", "-").replace("–", "-")
+    cleaned = cleaned.replace(" ", "").replace(" ", "").replace(" ", "")
+    return float(cleaned.replace(",", "."))
+
+
+def _resolve_unit_alias(raw_unit: str) -> str:
+    # После lowercase «С» и «с» неразличимы, поэтому регистр
+    # разрешается здесь, пока он ещё известен
+    if raw_unit in ("С", "C"):
+        return "°C"
+    if raw_unit in ("с", "s"):
+        return "сек"
+    return raw_unit
 
 
 def normalize_quantity(value: float, unit: str) -> tuple[str, float, str]:
@@ -223,10 +289,10 @@ def normalize_for_quantity(value: float, unit: str | None, quantity: str | None)
 def validate_candidate_numbers(
     payload: dict[str, Any], source_text: str | None, rules: dict[str, Any] | None = None
 ) -> dict[str, Any]:
-    """Validate extracted numeric values against source text using regex + Pint-compatible units.
+    """Сверяет извлечённые числа с числами источника в нормализованных единицах.
 
-    При переданных rules числа дополнительно проверяются на правдоподобие
-    по диапазонам из validation-rules.yaml.
+    При переданных rules именованные numeric_parameters дополнительно
+    проверяются на правдоподобие по диапазонам из validation-rules.yaml.
     """
 
     hits = extract_quantity_hits(source_text or "")
@@ -236,7 +302,6 @@ def validate_candidate_numbers(
     field_rules = [
         ("temperature_c", "temperature", 1.0),
         ("duration_h", "duration", 0.1),
-        ("effect_value", "relative_effect", 0.1),
     ]
     for field, kind, tolerance in field_rules:
         value = _float_or_none(payload.get(field))
@@ -247,17 +312,21 @@ def validate_candidate_numbers(
         elif source_text:
             issues.append(f"{field}={value:g} не найдено в source evidence regex+unit validation")
 
+    # Эффект сверяется в его собственной единице (м/с, мг/л, HV),
+    # а не как безусловные проценты; без единицы считаем эффект процентами
+    effect_value = _float_or_none(payload.get("effect_value"))
+    if effect_value is not None:
+        effect_unit = payload.get("effect_unit")
+        if _unit_spec(effect_unit) is None:
+            effect_unit = "%" if not effect_unit else None
+        if _value_seen_in_source(effect_value, hits, unit=effect_unit, source_text=source_text or "", tolerance=0.1):
+            matched_fields.append("effect_value")
+        elif source_text:
+            issues.append(f"effect_value={effect_value:g} не найдено в source evidence regex+unit validation")
+
     if rules:
-        ranges_by_quantity = rules.get("ranges_by_quantity", {})
-        has_named_numeric_parameters = bool(payload.get("numeric_parameters"))
-        if not has_named_numeric_parameters:
-            for hit in hits:
-                bounds = ranges_by_quantity.get(hit.kind)
-                if bounds and not (bounds[0] <= hit.normalized_value <= bounds[1]):
-                    issues.append(
-                        f"{hit.value:g} {hit.unit} вне диапазона правдоподобия {bounds[0]:g}-{bounds[1]:g} ({hit.kind})"
-                    )
-        # Точная проверка по имени параметра: извлечённые numeric_parameters несут название
+        # Правдоподобие проверяется по имени параметра: объединённые
+        # по виду величины диапазоны дают ложные отказы («рост на 150 %»)
         ranges_by_name = rules.get("ranges_by_name", {})
         quantity_by_name = rules.get("quantity_by_name", {})
         for param in payload.get("numeric_parameters") or []:
@@ -277,7 +346,10 @@ def validate_candidate_numbers(
             ]
             if not values:
                 continue
-            if source_text and not all(_value_seen_in_source(value, hits, unit=unit, quantity=quantity) for value in values):
+            if source_text and not all(
+                _value_seen_in_source(value, hits, unit=unit, quantity=quantity, source_text=source_text)
+                for value in values
+            ):
                 issues.append(f"«{param.get('name') or param.get('type') or 'numeric_parameter'}»={values} не найдено в source evidence")
             if bounds is None:
                 continue
@@ -331,13 +403,6 @@ def _matching_rule(name: str, ranges_by_name: dict[str, tuple[float, float]]) ->
     return None, None
 
 
-def _convert(value: float, source_unit: str, target_unit: str) -> float:
-    if UnitRegistry is None:
-        return value
-    registry = UnitRegistry()
-    return float((value * registry(source_unit)).to(target_unit).magnitude)
-
-
 def _float_or_none(value: Any) -> float | None:
     if value in (None, ""):
         return None
@@ -352,14 +417,43 @@ def _value_seen_in_source(
     hits: list[QuantityHit],
     unit: str | None = None,
     quantity: str | None = None,
+    source_text: str = "",
+    tolerance: float = 0.01,
 ) -> bool:
-    expected = normalize_for_quantity(value, unit, quantity)
-    for hit in hits:
-        if abs(hit.value - value) <= 0.01 or abs(hit.normalized_value - value) <= 0.01:
-            return True
-        if expected is None:
-            continue
-        actual = normalize_for_quantity(hit.value, hit.unit, quantity)
-        if actual is not None and abs(actual[0] - expected[0]) <= 0.01:
+    spec = _unit_spec(unit)
+    if spec is not None:
+        # Сравнение только в совместимой размерности: «5 г/л» в тексте
+        # не подтверждает извлечённые «5 мг/л»
+        expected_base = value * spec.to_base
+        for hit in hits:
+            hit_spec = _unit_spec(hit.unit)
+            if hit_spec is None or hit_spec.dimension != spec.dimension:
+                continue
+            if abs(hit.value * hit_spec.to_base - expected_base) <= tolerance:
+                return True
+        return False
+    if quantity is not None:
+        # Единица параметра не указана: считаем значение заданным
+        # в единице правила и сверяем с конвертированными хитами
+        expected = normalize_for_quantity(value, unit, quantity)
+        if expected is not None:
+            for hit in hits:
+                actual = normalize_for_quantity(hit.value, hit.unit, quantity)
+                if actual is not None and abs(actual[0] - expected[0]) <= tolerance:
+                    return True
+            return False
+    # Единица неизвестна валидатору: размерность проверить нельзя,
+    # подтверждаем хотя бы присутствие самого числа в тексте
+    if any(abs(hit.value - value) <= tolerance for hit in hits):
+        return True
+    return _plain_number_in_text(value, source_text)
+
+
+def _plain_number_in_text(value: float, text: str) -> bool:
+    if not text:
+        return False
+    rendered = f"{value:g}"
+    for variant in {rendered, rendered.replace(".", ",")}:
+        if re.search(r"(?<![\w.,\-])" + re.escape(variant) + r"(?!\d|[.,]\d)", text):
             return True
     return False
