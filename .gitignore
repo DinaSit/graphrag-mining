@@ -16,3 +16,7 @@ storage/
 minio-data/
 postgres-data/
 neo4j-data/
+tests/
+# локальные настройки Claude Code / IDE-сессий — машиноспецифичны
+.claude/
+.DS_Store

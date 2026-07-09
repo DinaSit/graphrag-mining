@@ -13,12 +13,23 @@ CREATE TABLE IF NOT EXISTS documents (
     storage_bucket VARCHAR(256),
     storage_object VARCHAR(1024),
     storage_uri VARCHAR(1400),
-    created_at VARCHAR(64) NOT NULL
+    created_at VARCHAR(64) NOT NULL,
+    -- Скрытие из ответов без удаления данных (Neo4j не перестраивается)
+    hidden BOOLEAN NOT NULL DEFAULT FALSE,
+    -- Эвристические признаки документа; NULL — ещё не вычислены
+    is_scientific BOOLEAN,
+    origin TEXT,
+    -- Год издания из текста документа; NULL — ещё не вычислен/не найден
+    year INTEGER
 );
 
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS storage_bucket VARCHAR(256);
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS storage_object VARCHAR(1024);
 ALTER TABLE documents ADD COLUMN IF NOT EXISTS storage_uri VARCHAR(1400);
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS hidden BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS is_scientific BOOLEAN;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS origin TEXT;
+ALTER TABLE documents ADD COLUMN IF NOT EXISTS year INTEGER;
 
 CREATE TABLE IF NOT EXISTS document_versions (
     id VARCHAR(64) PRIMARY KEY,

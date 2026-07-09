@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from app.pipeline.normalization import float_or_none
+
 try:
     import yaml
 except ImportError:  # pragma: no cover
@@ -304,7 +306,7 @@ def validate_candidate_numbers(
         ("duration_h", "duration", 0.1),
     ]
     for field, kind, tolerance in field_rules:
-        value = _float_or_none(payload.get(field))
+        value = float_or_none(payload.get(field))
         if value is None:
             continue
         if any(hit.kind == kind and abs(hit.normalized_value - value) <= tolerance for hit in hits):
@@ -314,7 +316,7 @@ def validate_candidate_numbers(
 
     # Эффект сверяется в его собственной единице (м/с, мг/л, HV),
     # а не как безусловные проценты; без единицы считаем эффект процентами
-    effect_value = _float_or_none(payload.get("effect_value"))
+    effect_value = float_or_none(payload.get("effect_value"))
     if effect_value is not None:
         effect_unit = payload.get("effect_unit")
         if _unit_spec(effect_unit) is None:
@@ -338,9 +340,9 @@ def validate_candidate_numbers(
             unit = param.get("unit")
             values = [
                 value for value in (
-                    _float_or_none(param.get("value")),
-                    _float_or_none(param.get("value_min")),
-                    _float_or_none(param.get("value_max")),
+                    float_or_none(param.get("value")),
+                    float_or_none(param.get("value_min")),
+                    float_or_none(param.get("value_max")),
                 )
                 if value is not None
             ]
@@ -401,15 +403,6 @@ def _matching_rule(name: str, ranges_by_name: dict[str, tuple[float, float]]) ->
         if rule_name in name:
             return rule_name, bounds
     return None, None
-
-
-def _float_or_none(value: Any) -> float | None:
-    if value in (None, ""):
-        return None
-    try:
-        return float(str(value).replace(",", "."))
-    except ValueError:
-        return None
 
 
 def _value_seen_in_source(

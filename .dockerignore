@@ -13,3 +13,7 @@ neo4j-data
 minio-data
 storage
 *.log
+backend/tests/
+ml_extraction/tests/
+.claude
+.DS_Store

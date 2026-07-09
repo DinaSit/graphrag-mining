@@ -1,8 +1,8 @@
 """Фоновая обработка документов: очередь в памяти + фиксированное число воркеров.
 
-Загрузка и переобработка выполняются вне HTTP-запроса: API отвечает сразу,
-статусы задач пишутся в таблицу jobs. Число воркеров ограничивает параллельную
-обработку документов; суммарный лимит LLM-вызовов держит сервис извлечения.
+Загрузка выполняется вне HTTP-запроса: API отвечает сразу, статусы задач
+пишутся в таблицу jobs. Число воркеров ограничивает параллельную обработку
+документов; суммарный лимит LLM-вызовов держит сервис извлечения.
 """
 from __future__ import annotations
 
@@ -38,9 +38,6 @@ class IngestQueue:
             "access_level": access_level,
         })
 
-    def enqueue_reprocess(self, document_id: str) -> str:
-        return self._enqueue({"kind": "reprocess", "document_id": document_id})
-
     def get_job(self, job_id: str) -> dict | None:
         with self._jobs_lock:
             job = self.jobs.get(job_id)
@@ -59,13 +56,10 @@ class IngestQueue:
             job_id = task["job_id"]
             try:
                 self._record(job_id, task, "processing")
-                if task["kind"] == "ingest":
-                    self.store.ingest_document(
-                        task["filename"], task["content"], task["document_type"],
-                        task["source_label"], task["access_level"],
-                    )
-                else:
-                    self.store.reprocess_document(task["document_id"])
+                self.store.ingest_document(
+                    task["filename"], task["content"], task["document_type"],
+                    task["source_label"], task["access_level"],
+                )
                 self._record(job_id, task, "completed")
             except Exception as exc:
                 log.exception("Фоновая задача %s (%s) упала", job_id, task["kind"])

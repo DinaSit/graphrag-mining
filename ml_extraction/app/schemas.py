@@ -28,8 +28,6 @@ class SourceFragment(BaseModel):
     section: str | None = None
     text: str
     normalized_text: str
-    bbox: list[float] | None = None
-    image_ref: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -51,16 +49,30 @@ class ExtractResponse(BaseModel):
     candidates: list[ExtractionCandidate]
 
 
+class WebSearchRequest(BaseModel):
+    question: str
+
+
+class WebSearchResponse(BaseModel):
+    # Формат К3: [{"title": str, "url": str, "snippet": str}]
+    results: list[dict[str, Any]] = Field(default_factory=list)
+    query_used: str = ""
+
+
 class WebAnswerRequest(BaseModel):
     question: str
+    # Необязательная готовая выдача формата /web_search (К3): передана и непуста —
+    # собственный поиск пропускается, сразу LLM-суммаризация по ней
+    results: list[dict[str, Any]] | None = None
 
 
 class WebAnswerResponse(BaseModel):
     found: bool
     answer: str | None = None
     url: str | None = None
-    # Сырые выдержки поисковой выдачи [{title, url, snippet}]: показываются всегда,
-    # а при отказе LLM (llm_error) заменяют связный ответ
+    # Сырые выдержки поисковой выдачи [{title, url, snippet, year?}]: показываются
+    # всегда, а при отказе LLM (llm_error) заменяют связный ответ. year — год
+    # публикации из научных API (int | None); у ddgs-выдачи года нет (None)
     snippets: list[dict[str, Any]] = Field(default_factory=list)
     llm_error: str | None = None
 

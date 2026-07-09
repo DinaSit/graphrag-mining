@@ -5,6 +5,14 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+# Типы узлов доменной онтологии (domain/default/ontology.yaml, владелец —
+# инженер знаний). Единственный источник для whitelist меток Neo4j
+# (persistence.Neo4jSink) и схемы Query Planner (query_parsing).
+ONTOLOGY_LABELS = (
+    "Material", "Process", "Equipment", "Property", "NumericParameter", "Condition",
+    "Experiment", "Publication", "Expert", "Facility", "Result", "Recommendation", "Region",
+)
+
 
 class DocumentStatus(str, Enum):
     pending = "pending"
@@ -42,7 +50,20 @@ class DocumentRecord(BaseModel):
     storage_bucket: str | None = None
     storage_object: str | None = None
     storage_uri: str | None = None
+    # Ключ PDF-превью в MinIO (<storage_object>.preview.pdf) для DOCX/PPTX,
+    # конвертация через LibreOffice; None — превью нет (не создано/сбой)
+    preview_object: str | None = None
     created_at: str
+    # Скрытый документ полностью выпадает из ответов (факты, поиск, граф),
+    # но данные не удаляются и Neo4j не перестраивается
+    hidden: bool = False
+    # Эвристические признаки документа (см. pipeline/document_traits.py);
+    # None — признак ещё не вычислен
+    is_scientific: bool | None = None
+    origin: str | None = None  # "ru" | "foreign"
+    # Год издания из ТЕКСТА документа (не из даты файла); best-effort эвристика
+    # extract_publication_year. None — год не найден или ещё не вычислен
+    year: int | None = None
 
 
 class DocumentVersion(BaseModel):
@@ -64,8 +85,6 @@ class SourceFragment(BaseModel):
     section: str | None = None
     text: str
     normalized_text: str
-    bbox: list[float] | None = None
-    image_ref: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -163,15 +182,15 @@ class QueryResponse(BaseModel):
     gaps: list[str]
     confidence: float
     hypotheses: list[str] = Field(default_factory=list)
-    # Ответ из внешних источников, когда прямых фактов в базе нет.
-    # Не верифицирован и в граф не записывается:
-    # {"answer": str|None, "url": str, "snippets": [...], "llm_error": str|None}
+    # УСТАРЕЛО (совместимость): веб-поиск вынесен в отдельный контур
+    # POST /web/answer и больше не заполняет это поле в /ask и /ask/stream
     web_answer: dict[str, Any] | None = None
     # Обе LLM недоступны: человекочитаемая причина; ответ собран без генерации
     llm_error: str | None = None
     # Семантический поиск bge-m3 — работает без LLM, показывается пользователю
     search_hits: list[SearchHit] = Field(default_factory=list)
-    # Нашлись ли прямые факты (не гипотезы); False запускает ступень веб-поиска
+    # Нашлись ли прямые факты (не гипотезы); по False UI может предложить
+    # пользователю независимый веб-поиск (POST /web/answer)
     has_direct_facts: bool = False
     # Смежные факты: полезный контекст, но не прямой ответ на вопрос.
     related_experiments: list[ExperimentRow] = Field(default_factory=list)
@@ -181,12 +200,13 @@ class QueryResponse(BaseModel):
     # Вопрос не про базу знаний (смолток/оффтоп): полный пайплайн, включая
     # LLM, граф и веб-поиск, не запускался — ответ мгновенный
     offtopic: bool = False
-
-
-class SearchRequest(BaseModel):
-    query: str
-    filters: QueryFilters = Field(default_factory=QueryFilters)
-    top_k: int = 8
+    # Какой веткой собран ответ: "fast" — классический RAG (только семантический
+    # поиск, без LLM-планировщика и графа), "full" — полный пайплайн
+    pipeline_mode: str = "full"
+    # Доля файлов с is_scientific=True среди файлов, на которые ссылаются
+    # СНОСКИ ответа (0..1, 2 знака); без цитат — по итоговому списку sources;
+    # None — ни у одного файла-источника признак не вычислен
+    scientific_share: float | None = None
 
 
 class SearchHit(BaseModel):
@@ -195,10 +215,6 @@ class SearchHit(BaseModel):
     text: str
     source: SourceRef
     metadata: dict[str, Any] = Field(default_factory=dict)
-
-
-class SearchResponse(BaseModel):
-    hits: list[SearchHit]
 
 
 class QueryCondition(BaseModel):
@@ -214,20 +230,22 @@ class QueryEntity(BaseModel):
 
 
 class ParsedQuestion(BaseModel):
-    intent: str = "compare_experiments"
     material: str | None = None
     property: str | None = None
-    temperature_min: float | None = None
-    temperature_max: float | None = None
-    unit: str = "C"
     process: str | None = None
     equipment: str | None = None
     region: str | None = None
-    year_from: int | None = None
     entities: list[QueryEntity] = Field(default_factory=list)
     conditions: list[QueryCondition] = Field(default_factory=list)
     target: QueryCondition | None = None
-    keywords: list[str] = Field(default_factory=list)
+
+
+class DocumentVisibilityRequest(BaseModel):
+    hidden: bool
+
+
+class RejectFactRequest(BaseModel):
+    note: str | None = None
 
 
 class OntologyCandidate(BaseModel):

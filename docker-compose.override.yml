@@ -60,7 +60,7 @@ services:
       # Реальное извлечение обрабатывает батч дольше 8 с (значение по умолчанию
       # в RemoteExtractionProvider); увеличенный таймаут задаётся здесь.
       EXTRACTION_TIMEOUT: "600"
-      # Семантический индекс: эмбеддинги Yandex v2 (256 изм.) через сервис ml-extraction.
+      # Семантический индекс: эмбеддинги bge-m3 через сервис ml-extraction.
       # Убрать переменную — backend вернётся на deterministic-hash (64).
       EMBEDDINGS_URL: http://ml-extraction:8002/embed
       # Эмбеддинги bge-m3: размерность 1024, таймаут с запасом под CPU-обсчёт пачки
@@ -83,13 +83,6 @@ services:
         condition: service_completed_successfully
       ml-extraction:
         condition: service_healthy
-
-  # CSS интерфейса свёрстан под светлую тему; при тёмной теме браузера Streamlit
-  # переключается на тёмную базу и текст становится нечитаемым. Тема фиксируется
-  # до появления тёмной вёрстки.
-  streamlit:
-    environment:
-      STREAMLIT_THEME_BASE: "light"
 
 volumes:
   hf-cache:

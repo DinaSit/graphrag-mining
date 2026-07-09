@@ -1,6 +1,6 @@
 # ML Extraction Service
 
-Сервис извлечения фактов из документов (зона ML-инженера А). Заменяет `ml-mock`:
+Сервис извлечения фактов из документов. Заменяет `ml-mock`:
 тот же контракт `POST /extract {fragments} → {candidates}`, внутри — модель
 Qwen3.6-35B через Yandex AI Studio (OpenAI-совместимый API).
 
@@ -15,7 +15,7 @@ Qwen3.6-35B через Yandex AI Studio (OpenAI-совместимый API).
 
 ```
 YANDEX_API_KEY=<ключ Yandex AI Studio>
-YANDEX_FOLDER_ID=b1ggusvist6c2sia1dno
+YANDEX_FOLDER_ID=<folder id>
 ```
 
 ## Запуск
@@ -49,11 +49,13 @@ python scripts/run_corpus.py --src <папка> --out results/ --limit 3
 
 ```
 app/
-  main.py                 FastAPI: /extract, /health
+  main.py                 FastAPI: /extract, /chat_json, /chat_stream, /web_search, /web_answer, /embed, /health
   extractor.py            оркестрация: фрагменты → LLM → кандидаты
   prompt.py               сборка промпта из domain/default
   prompts/extraction.md   шаблон промпта извлечения
-  yandex_client.py        клиент Yandex AI Studio: chat, chat_json, embed
+  yandex_client.py        клиент Yandex AI Studio: chat, chat_json, chat_stream (каскад Яндекс → фолбэк)
+  web_search.py           поиск по разрешённым доменам (ddgs) и LLM-сводка веб-ответа
+  embeddings.py           локальные эмбеддинги bge-m3 (1024)
   schemas.py              копии контрактных моделей backend
   config.py               конфигурация из переменных окружения
 scripts/
@@ -68,7 +70,7 @@ scripts/
 `numeric_parameters` — задел под расширение схемы графа до полной онтологии.
 Данные сохраняются в PostgreSQL (JSONB) без изменений схемы.
 
-## Интеграция для ML-инженера Б
+## Интеграция
 
 `app/yandex_client.py` — общая точка доступа к LLM: `chat()`, `chat_json()`,
 `embed(kind="doc"|"query")`. Для документов и поисковых запросов у Яндекса

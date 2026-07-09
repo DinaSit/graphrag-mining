@@ -3,16 +3,27 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import random
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from app.file_storage import MinioFileStorage
-from app.persistence import Neo4jSink, PostgresSink, _slug
-from app.pipeline.normalization import DomainNormalizer
-from app.pipeline.parsers import choose_parser
+from app.file_storage import PREVIEW_SUFFIX, MinioFileStorage
+from app.persistence import Neo4jSink, PostgresSink
+from app.pipeline.document_traits import classify_document, extract_publication_year
+from app.pipeline.normalization import (
+    JUNK_VALUES,
+    DomainNormalizer,
+    canonical_text,
+    clean_extracted,
+    direction_label,
+    float_or_none,
+    slug,
+)
+from app.pipeline.office_render import convert_office_to_pdf
+from app.pipeline.parsers import choose_parser, extension_of
 from app.pipeline.providers import (
     DeterministicEmbeddingProvider,
     MockLLMProvider,
@@ -46,6 +57,10 @@ log = logging.getLogger(__name__)
 
 AUTO_APPROVE_THRESHOLD = 0.85
 
+# Форматы, для которых при инжесте строится PDF-превью (LibreOffice уже в образе).
+# PDF рендерится браузером как есть, у прочих форматов превью нет
+PREVIEW_SOURCE_EXTENSIONS = frozenset({".docx", ".docm", ".pptx"})
+
 
 class SourceRequiredError(ValueError):
     pass
@@ -70,7 +85,8 @@ class ApplicationStore:
         self.reject_threshold = float(thresholds.get("review_min", 0.60))
         self.llm = RemoteExtractionProvider(extraction_service_url) if extraction_service_url else MockLLMProvider()
         # Провайдер эмбеддингов выбирается окружением: EMBEDDINGS_URL задан —
-        # внешний сервис (Yandex v2, 256), не задан — детерминированный baseline (64)
+        # внешний сервис (bge-m3 в ml-extraction, размерность EMBEDDING_DIM=1024),
+        # не задан — детерминированный baseline (64)
         embeddings_url = os.environ.get("EMBEDDINGS_URL")
         self.embedder = RemoteEmbeddingProvider(embeddings_url) if embeddings_url else DeterministicEmbeddingProvider()
         self.postgres_sink = postgres_sink
@@ -86,13 +102,10 @@ class ApplicationStore:
         # Дедуп по checksum: проверка и регистрация документа атомарны,
         # иначе два ingest-воркера создают дубликаты одного файла
         self._ingest_lock = threading.Lock()
-        # Документы, удаление которых уже началось: reprocess сверяется с этим
-        # набором под тем же локом, иначе результаты извлечения, пришедшие во
+        # Документы, удаление которых уже началось: reprocess и toggle видимости
+        # сверяются с этим набором под тем же локом, иначе записи, пришедшие во
         # время удаления, ре-INSERT-ят документ-призрак в PG/Neo4j
         self._deleting: set[str] = set()
-        # Монотонный счётчик изменений данных: кэш ответов /ask валиден,
-        # только пока версия не изменилась
-        self.data_version = 0
 
     def hydrate_from_postgres(self) -> None:
         """Восстанавливает состояние из PostgreSQL после перезапуска backend-а."""
@@ -106,22 +119,227 @@ class ApplicationStore:
         self.facts.update(state["facts"])
         self.fragment_vectors.update(state["vectors"])
         self.ontology_candidates.update(state.get("ontology_candidates", {}))
+        # Признаки документов, загруженных до появления эвристики, дочитываются
+        # синхронно: счёт по фрагментам в памяти, объём — единицы документов.
+        # Группировка фрагментов по документу делается один раз на оба бэкфила,
+        # а не полным сканом стора на каждый документ
+        fragments_by_document = self._fragments_by_document()
+        self._backfill_document_traits(fragments_by_document)
+        # Год издания — отдельным проходом: документ мог получить is_scientific
+        # до появления поля year, поэтому бэкфил года не совмещён с traits
+        self._backfill_document_years(fragments_by_document)
+        # Мусорные значения ('не указано', 'unknown'…) в старых фактах чистятся
+        # у источника единожды при старте (идемпотентно)
+        self._backfill_junk_facts()
         # Фрагменты без векторов (например, после смены модели эмбеддингов)
         # индексируются заново в фоне: старт backend не блокируется
         missing = [fragment for fid, fragment in self.fragments.items() if fid not in self.fragment_vectors]
         if missing:
             threading.Thread(target=self._reindex_missing, args=(missing,), daemon=True, name="reindex-missing").start()
+        # DOCX/PPTX, загруженные до появления PDF-превью, конвертируются в фоне
+        # (как _reindex_missing): старт backend не блокируется, идемпотентно —
+        # документ с уже проставленным preview_object пропускается
+        if self.file_storage and self.file_storage.enabled:
+            no_preview = [
+                document for document in list(self.documents.values())
+                if document.storage_object
+                and document.preview_object is None
+                and extension_of(document.filename) in PREVIEW_SOURCE_EXTENSIONS
+            ]
+            if no_preview:
+                threading.Thread(
+                    target=self._backfill_previews, args=(no_preview,), daemon=True, name="preview-backfill"
+                ).start()
+
+    def _fragments_by_document(self) -> dict[str, list[SourceFragment]]:
+        """Фрагменты, сгруппированные по документу, в порядке (page, id):
+        порядок из PG не гарантирован — восстанавливается по странице."""
+        grouped: dict[str, list[SourceFragment]] = {}
+        for fragment in list(self.fragments.values()):
+            grouped.setdefault(fragment.document_id, []).append(fragment)
+        for fragments in grouped.values():
+            fragments.sort(key=lambda fragment: (fragment.page, fragment.id))
+        return grouped
+
+    def _backfill_document_traits(self, fragments_by_document: dict[str, list[SourceFragment]] | None = None) -> None:
+        """Вычисляет is_scientific/origin документам, у которых признаков ещё нет."""
+        if fragments_by_document is None:
+            fragments_by_document = self._fragments_by_document()
+        for document in list(self.documents.values()):
+            if document.is_scientific is not None:
+                continue
+            fragments = fragments_by_document.get(document.id)
+            if not fragments:
+                continue
+            document.is_scientific, document.origin = classify_document(fragments)
+            version = self.versions.get(document.current_version_id)
+            if version is not None:
+                try:
+                    self._persist_document(document, version)
+                except Exception:
+                    # Признаки справочные: сбой записи не должен ронять старт,
+                    # бэкфил повторится при следующем запуске
+                    log.exception("Не удалось сохранить признаки документа %s", document.id)
+
+    def _backfill_document_years(self, fragments_by_document: dict[str, list[SourceFragment]] | None = None) -> None:
+        """Проставляет year документам, у которых он ещё не вычислен (None).
+
+        Идемпотентно: документ с уже известным годом пропускается, повторный
+        старт ничего не пишет. Год из документа без найденного года останется
+        None и будет пересчитываться при каждом старте — это дёшево (единицы
+        документов, счёт по фрагментам в памяти) и позволяет подхватить год,
+        если эвристику позже улучшат.
+        """
+        if fragments_by_document is None:
+            fragments_by_document = self._fragments_by_document()
+        filled = 0
+        for document in list(self.documents.values()):
+            if document.year is not None:
+                continue
+            fragments = fragments_by_document.get(document.id)
+            if not fragments:
+                continue
+            year = extract_publication_year(fragments, document.filename)
+            if year is None:
+                continue
+            document.year = year
+            version = self.versions.get(document.current_version_id)
+            if version is not None:
+                try:
+                    self._persist_document(document, version)
+                except Exception:
+                    # Год справочный: сбой записи не роняет старт, повторится
+                    log.exception("Не удалось сохранить год документа %s", document.id)
+            filled += 1
+        if filled:
+            log.info("backfill: год издания проставлен %d документам", filled)
+
+    def _backfill_junk_facts(self) -> None:
+        """Чистит мусорные значения текстовых полей существующих фактов до ''
+        (единый clean_extracted) и персистит. Идемпотентно: уже чистое поле
+        не меняется, так что повторный старт не пишет ничего."""
+        cleaned = 0
+        for fact in list(self.facts.values()):
+            updates: dict[str, Any] = {}
+            for field in ("material", "process", "sample", "lab", "team"):
+                value = getattr(fact, field)
+                new_value = clean_extracted(value)
+                if new_value != value:
+                    updates[field] = new_value
+            property_clean = clean_extracted(fact.property)
+            if property_clean != fact.property:
+                updates["property"] = property_clean
+            # effect_direction 'unknown'/мусор → '' (в подписи такого направления не бывает)
+            if _normalize_effect_direction(fact.effect_direction) == "unknown" and fact.effect_direction != "":
+                updates["effect_direction"] = ""
+            equipment_clean = clean_extracted(fact.equipment) or None
+            if equipment_clean != fact.equipment:
+                updates["equipment"] = equipment_clean
+            if "material" in updates:
+                updates["material_id"] = f"material-{slug(updates['material'])}"
+            if not updates:
+                continue
+            updated = fact.model_copy(update=updates)
+            self.facts[fact.id] = updated
+            try:
+                self._persist_fact(updated)
+            except Exception:
+                # Гигиена справочная: сбой записи не роняет старт, повторится
+                log.exception("Не удалось сохранить очищенный факт %s", fact.id)
+            cleaned += 1
+        if cleaned:
+            log.info("backfill: очищено мусорных значений в %d фактах", cleaned)
 
     def _reindex_missing(self, fragments: list[SourceFragment]) -> None:
         try:
             self.index_fragments(fragments)
-            print(f"hydrate: переиндексировано {len(fragments)} фрагментов")
-        except Exception as exc:
-            print(f"hydrate: переиндексация {len(fragments)} фрагментов не удалась: {exc}")
+            log.info("hydrate: переиндексировано %d фрагментов", len(fragments))
+        except Exception:
+            log.exception("hydrate: переиндексация %d фрагментов не удалась", len(fragments))
+
+    def _make_preview(self, document: DocumentRecord, content: bytes) -> None:
+        """Строит PDF-превью DOCX/PPTX (LibreOffice) и кладёт его в MinIO рядом
+        с оригиналом (<storage_object>.preview.pdf), проставляя preview_object.
+
+        Превью необязательно: сбой конвертации или недоступный MinIO не бросают —
+        preview_object просто остаётся None (лог пишут convert/put_preview).
+        """
+        if not (self.file_storage and self.file_storage.enabled and document.storage_object):
+            return
+        suffix = extension_of(document.filename)
+        if suffix not in PREVIEW_SOURCE_EXTENSIONS:
+            return
+        pdf_bytes = convert_office_to_pdf(content, suffix)
+        if pdf_bytes is None:
+            return
+        preview_object = f"{document.storage_object}{PREVIEW_SUFFIX}"
+        if self.file_storage.put_preview(preview_object, pdf_bytes):
+            document.preview_object = preview_object
+
+    def _backfill_previews(self, documents: list[DocumentRecord]) -> None:
+        """Фоновый бэкфил PDF-превью для существующих DOCX/PPTX: скачать оригинал
+        из MinIO, сконвертировать, положить превью, персистнуть preview_object.
+        Ошибки по одному документу логируются и не прерывают остальные."""
+        built = 0
+        for document in documents:
+            try:
+                assert document.storage_object is not None  # отфильтровано вызывающим
+                original = self.file_storage.get_object(document.storage_object)
+                if original is None:
+                    continue
+                self._make_preview(document, original)
+                if document.preview_object is None:
+                    continue
+                version = self.versions.get(document.current_version_id)
+                if version is not None:
+                    self._persist_document(document, version)
+                built += 1
+            except Exception:
+                log.exception("backfill: PDF-превью документа %s не создано", document.id)
+        if built:
+            log.info("backfill: PDF-превью создано для %d документов", built)
 
     def add_source_fragment(self, fragment: SourceFragment) -> None:
         self.fragments[fragment.id] = fragment
         self._persist_fragments([fragment])
+
+    # --- Скрытие документов: единая точка фильтрации для всех путей ответа ---
+
+    def hidden_document_ids(self) -> set[str]:
+        """id скрытых документов; снапшот — воркеры мутируют documents параллельно."""
+        return {doc_id for doc_id, document in list(self.documents.items()) if document.hidden}
+
+    def is_visible_fact(self, fact: Fact) -> bool:
+        document = self.documents.get(fact.source.document_id)
+        return document is None or not document.hidden
+
+    def visible_facts(self) -> list[Fact]:
+        """Факты из нескрытых документов — единственный источник фактов для ответов."""
+        hidden = self.hidden_document_ids()
+        return [fact for fact in list(self.facts.values()) if fact.source.document_id not in hidden]
+
+    def set_document_visibility(self, document_id: str, hidden: bool) -> DocumentRecord:
+        """Скрывает/показывает документ. Данные не удаляются, Neo4j не перестраивается."""
+        # Проверка и persist атомарны под общим с delete_document локом
+        # (по образцу reprocess_document): toggle, догнавший удаление, не должен
+        # ре-INSERT-ить строку только что удалённого документа в PG
+        with self._ingest_lock:
+            if not self._document_alive(document_id):
+                raise KeyError(document_id)
+            document = self.documents[document_id]
+            document.hidden = hidden
+            version = self.versions.get(document.current_version_id)
+            if version is not None:
+                self._persist_document(document, version)
+        return document
+
+    def random_visible_fact(self) -> Fact | None:
+        """Случайный approved-факт из нескрытого документа; None, если таких нет."""
+        pool = [fact for fact in self.visible_facts() if fact.status == "approved"]
+        if not pool:
+            return None
+        # random.choice допустим: интерактивная фича UI, не workflow-скрипт
+        return random.choice(pool)
 
     def delete_document(self, document_id: str) -> dict:
         """Удаляет документ со всем, что из него извлечено: фрагменты, кандидаты,
@@ -175,7 +393,6 @@ class ApplicationStore:
                     fact.status = "approved"
                 self._persist_fact(fact)
 
-        self.data_version += 1
         return {"document_id": document_id, "fragments": len(fragment_ids),
                 "candidates": len(candidate_ids), "facts": len(fact_ids)}
 
@@ -269,10 +486,15 @@ class ApplicationStore:
                 self.add_candidate(candidate)
 
             self.index_fragments(fragments)
+            # Признаки документа считаются по готовым фрагментам один раз
+            document.is_scientific, document.origin = classify_document(fragments)
+            document.year = extract_publication_year(fragments, document.filename)
+            # PDF-превью DOCX/PPTX — после успешного парсинга; сбой не роняет
+            # инжест (preview_object останется None)
+            self._make_preview(document, content)
             document.status = DocumentStatus.completed
             version.status = DocumentStatus.completed
             self._persist_document(document, version)
-            self.data_version += 1
             return document
         except Exception:
             document.status = DocumentStatus.failed
@@ -370,7 +592,6 @@ class ApplicationStore:
                     return accepted
                 document.status = version.status = DocumentStatus.completed
                 self._persist_document(document, version)
-                self.data_version += 1
             return accepted
         except Exception:
             with self._ingest_lock:
@@ -397,7 +618,6 @@ class ApplicationStore:
         self._persist_candidate(candidate)
         self._persist_fact(fact)
         self._project_semantics(fact, candidate)
-        self.data_version += 1
         return fact
 
     def _mark_conflicts(self, fact: Fact) -> None:
@@ -428,26 +648,30 @@ class ApplicationStore:
     def _fact_conflict_key(self, fact: Fact) -> tuple[str, str]:
         material = self.normalizer.normalize_entity(fact.material) or fact.material
         property_name = self.normalizer.normalize_entity(fact.property) or fact.property
-        return _canonical_text(material), _canonical_text(property_name)
+        return canonical_text(material), canonical_text(property_name)
 
     def _project_semantics(self, fact: Fact, candidate: ExtractionCandidate) -> None:
         """Переносит извлечённые сущности и связи онтологии из payload в Neo4j."""
         if not self.graph_sink:
             return
+        # Сущности с мусорными именами ('не указано', 'unknown'…) в граф не идут
         entities = [
-            {"type": item.get("type"), "name": self.normalizer.normalize_entity(str(item.get("name", ""))) or ""}
+            {"type": item.get("type"), "name": clean_extracted(self.normalizer.normalize_entity(clean_extracted(item.get("name"))))}
             for item in candidate.payload.get("entities", [])
             if isinstance(item, dict)
         ]
+        entities = [entity for entity in entities if entity["name"]]
+        # Ребро, чьё имя-конец мусорное, тоже не проецируется
         relations = [
             {
-                "subject": self.normalizer.normalize_entity(str(item.get("subject", ""))) or "",
+                "subject": clean_extracted(self.normalizer.normalize_entity(clean_extracted(item.get("subject")))),
                 "predicate": item.get("predicate"),
-                "object": self.normalizer.normalize_entity(str(item.get("object", ""))) or "",
+                "object": clean_extracted(self.normalizer.normalize_entity(clean_extracted(item.get("object")))),
             }
             for item in candidate.payload.get("relations", [])
             if isinstance(item, dict)
         ]
+        relations = [rel for rel in relations if rel["subject"] and rel["object"]]
         if entities or relations:
             self.graph_sink.upsert_semantics(fact.id, entities, relations)
 
@@ -456,7 +680,6 @@ class ApplicationStore:
         candidate.status = CandidateStatus.rejected
         candidate.review_note = note
         self._persist_candidate(candidate)
-        self.data_version += 1
         return candidate
 
     def index_fragments(self, fragments: list[SourceFragment]) -> None:
@@ -483,10 +706,14 @@ class ApplicationStore:
         # финальный порядок определяет гибридный скоринг с лексической добавкой
         candidates = self.postgres_sink.search_vectors(query_vector, top_k * 3)
         query_terms = set(query.lower().replace("ё", "е").split())
+        hidden = self.hidden_document_ids()
         hits: list[SearchHit] = []
         for fragment_id, semantic in candidates:
             fragment = self.fragments.get(fragment_id)
             if fragment is None:
+                continue
+            # Фрагменты скрытых документов отбрасываются ДО среза top_k
+            if fragment.document_id in hidden:
                 continue
             # ё→е с обеих сторон: normalized_text парсеров букву ё сохраняет
             haystack = fragment.normalized_text.replace("ё", "е")
@@ -512,86 +739,144 @@ class ApplicationStore:
             )
         return sorted(hits, key=lambda hit: hit.score, reverse=True)[:top_k]
 
-    def get_graph(self, facts: list[Fact] | None = None, entity_id: str | None = None) -> GraphPayload:
-        selected = facts if facts is not None else list(self.facts.values())
-        if entity_id:
-            selected = [
-                fact
-                for fact in selected
-                if entity_id in {fact.material_id, fact.experiment_id, fact.id, fact.source.fragment_id}
-            ]
+    # Семантические сущности, попадающие в ответный граф КГ: только эти типы
+    # (Material/Property/Effect/Laboratory/SourceFragment отдельными узлами нет)
+    _GRAPH_SEMANTIC_TYPES = frozenset({"Process", "Equipment", "Condition"})
+
+    def get_graph(self, facts: list[Fact] | None = None) -> GraphPayload:
+        # Без явного списка граф строится только по видимым фактам:
+        # скрытые документы не попадают в визуализацию
+        selected = facts if facts is not None else self.visible_facts()
         nodes: dict[str, GraphNode] = {}
         edges: dict[str, GraphEdge] = {}
+        # Дедуп узлов по (тип, каноническая подпись): «медь» из пяти фактов —
+        # один узел; ключ → стабильный id
+        node_ids: dict[tuple[str, str], str] = {}
 
-        def node(node_id: str, label: str, node_type: str, **data: Any) -> None:
-            nodes.setdefault(node_id, GraphNode(id=node_id, label=label, type=node_type, data=data))
+        def node(node_type: str, label: str, **data: Any) -> str | None:
+            """Создаёт (или переиспользует) узел; мусорная подпись узла не рождает.
+            Возвращает id узла или None, если подпись мусорная."""
+            if _is_junk_label(label):
+                return None
+            key = (node_type, canonical_text(label))
+            existing = node_ids.get(key)
+            if existing is not None:
+                return existing
+            base_id = f"{node_type.lower()}-{slug(label) or len(node_ids)}"
+            # Разные подписи, схлопнувшиеся в один slug, не должны делить id-узел
+            node_id = base_id
+            suffix = 2
+            while node_id in nodes:
+                node_id = f"{base_id}-{suffix}"
+                suffix += 1
+            node_ids[key] = node_id
+            nodes[node_id] = GraphNode(id=node_id, label=label, type=node_type, data=data)
+            return node_id
 
         def edge(source: str, target: str, label: str) -> None:
             edge_id = f"{source}-{label}-{target}"
             edges.setdefault(edge_id, GraphEdge(id=edge_id, source=source, target=target, label=label))
 
         for fact in selected:
+            # Claim: id факта как узел-id (дедуп по id, а не по подписи —
+            # разные факты с одинаковой подписью остаются разными утверждениями)
             claim_id = fact.id
-            property_id = f"property-{_slug(fact.property)}"
-            effect_id = f"effect-{fact.effect_direction}-{fact.experiment_id}"
-            source_id = fact.source.fragment_id
-            node(fact.material_id, fact.material, "Material")
-            node(fact.experiment_id, fact.experiment_id, "Experiment", temperature_c=fact.temperature_c)
-            node(claim_id, "Claim", "Claim", confidence=fact.confidence)
-            node(property_id, fact.property, "Property")
-            node(effect_id, _effect_label(fact), "Effect")
-            node(source_id, f"Источник {fact.source.page}", "SourceFragment", document_id=fact.source.document_id)
-            node(f"lab-{_slug(fact.lab)}", fact.lab, "Laboratory")
-            edge(claim_id, fact.material_id, "ABOUT")
-            edge(claim_id, fact.experiment_id, "BASED_ON")
-            edge(fact.experiment_id, property_id, "MEASURES")
-            edge(fact.experiment_id, effect_id, "PRODUCED")
-            edge(source_id, claim_id, "SUPPORTS")
-            edge(fact.experiment_id, f"lab-{_slug(fact.lab)}", "CONDUCTED_BY")
+            if claim_id not in nodes:
+                nodes[claim_id] = GraphNode(
+                    id=claim_id, label=_claim_label(fact), type="Claim",
+                    data={"confidence": fact.confidence, "title": _claim_title(fact)},
+                )
+            # Material → Claim
+            material_id = node("Material", fact.material)
+            if material_id is not None:
+                edge(material_id, claim_id, "ABOUT")
+            # Process → Claim
+            process_id = node("Process", fact.process)
+            if process_id is not None:
+                edge(process_id, claim_id, "USED_IN")
+            # Equipment → Claim
+            equipment_id = node("Equipment", fact.equipment or "")
+            if equipment_id is not None:
+                edge(equipment_id, claim_id, "USED_IN")
+            # Семантические сущности из payload (Process/Equipment/Condition) → Claim
+            for entity_type, entity_name in self._semantic_entities(fact):
+                entity_id = node(entity_type, entity_name)
+                if entity_id is not None:
+                    edge(entity_id, claim_id, "MENTIONS")
+            # Claim → Document (один узел на документ, а не на фрагмент;
+            # дедуп по document_id — одинаковые короткие имена не сливаются)
+            document_id, document_label = self._document_node(fact.source)
+            doc_node_id = f"document-{document_id}"
+            if doc_node_id not in nodes:
+                nodes[doc_node_id] = GraphNode(
+                    id=doc_node_id, label=document_label, type="Document",
+                    data={"document_id": document_id},
+                )
+            edge(claim_id, doc_node_id, "CITES")
         return GraphPayload(nodes=list(nodes.values()), edges=list(edges.values()))
 
-    def persistent_graph(self) -> GraphPayload:
-        if self.graph_sink:
-            graph = self.graph_sink.get_graph()
-            if graph.nodes:
-                return graph
-        return self.get_graph()
+    def _semantic_entities(self, fact: Fact) -> list[tuple[str, str]]:
+        """Process/Equipment/Condition с чистыми именами из payload кандидата факта.
+        Прочие типы (Material/Property/…) в ответный граф отдельными узлами не идут."""
+        if not fact.candidate_id:
+            return []
+        candidate = self.candidates.get(fact.candidate_id)
+        if candidate is None:
+            return []
+        result: list[tuple[str, str]] = []
+        for item in candidate.payload.get("entities", []):
+            if not isinstance(item, dict):
+                continue
+            entity_type = item.get("type")
+            if entity_type not in self._GRAPH_SEMANTIC_TYPES:
+                continue
+            name = clean_extracted(self.normalizer.normalize_entity(clean_extracted(item.get("name"))))
+            if name:
+                result.append((entity_type, name))
+        return result
 
-    def persistent_facts(self) -> list[dict[str, Any]]:
-        if self.postgres_sink:
-            rows = self.postgres_sink.list_facts()
-            if rows:
-                return rows
-        # Снапшот: ingest-воркеры мутируют facts во время запроса
-        return [fact.model_dump(mode="json") for fact in list(self.facts.values())]
+    def _document_node(self, source: SourceRef) -> tuple[str, str]:
+        """Один узел Document на документ: короткое имя файла без расширения (~20 симв.)."""
+        document = self.documents.get(source.document_id)
+        if document is None or not document.filename:
+            return source.document_id, source.document_id
+        name = document.filename.rsplit(".", 1)[0].strip()
+        if len(name) > 20:
+            name = name[:20].rstrip() + "…"
+        return source.document_id, name
 
     def _fact_from_candidate(self, candidate: ExtractionCandidate) -> Fact:
         payload = candidate.payload
-        material = self.normalizer.normalize_entity(str(payload.get("material", "Unknown Material"))) or "Unknown Material"
-        property_name = self.normalizer.normalize_entity(str(payload.get("property", "unknown property"))) or "unknown property"
+        # Гигиена у источника: мусорные значения ('не указано', 'unknown'…)
+        # чистятся до '' единым clean_extracted, а не превращаются в дефолт-заглушку
+        material = clean_extracted(self.normalizer.normalize_entity(clean_extracted(payload.get("material"))))
+        property_name = clean_extracted(self.normalizer.normalize_entity(clean_extracted(payload.get("property"))))
         source = candidate.source
         if source is None:
             raise SourceRequiredError("Факт не может быть утвержден без ссылки на source fragment.")
         fact_id = f"claim-{candidate.id.replace('candidate-', '')}"
+        effect_direction = _normalize_effect_direction(payload.get("effect_direction"))
+        if effect_direction == "unknown":
+            effect_direction = ""
         return Fact(
             id=fact_id,
             candidate_id=candidate.id,
             material=material,
-            material_id=f"material-{_slug(material)}",
+            material_id=f"material-{slug(material)}",
             experiment_id=str(payload.get("experiment_id") or f"exp-{uuid4().hex[:8]}"),
-            sample=str(payload.get("sample") or "unknown sample"),
-            process=str(payload.get("process") or "unknown process"),
-            temperature_c=_float_or_none(payload.get("temperature_c")),
-            duration_h=_float_or_none(payload.get("duration_h")),
+            sample=clean_extracted(payload.get("sample")),
+            process=clean_extracted(payload.get("process")),
+            temperature_c=float_or_none(payload.get("temperature_c")),
+            duration_h=float_or_none(payload.get("duration_h")),
             property=property_name,
-            effect_direction=_normalize_effect_direction(payload.get("effect_direction")),
-            effect_value=_float_or_none(payload.get("effect_value")),
+            effect_direction=effect_direction,
+            effect_value=float_or_none(payload.get("effect_value")),
             effect_unit=payload.get("effect_unit"),
-            result_value=_float_or_none(payload.get("result_value")),
+            result_value=float_or_none(payload.get("result_value")),
             result_unit=payload.get("result_unit"),
-            lab=str(payload.get("lab") or "Unknown Lab"),
-            team=str(payload.get("team") or "Unknown Team"),
-            equipment=payload.get("equipment"),
+            lab=clean_extracted(payload.get("lab")),
+            team=clean_extracted(payload.get("team")),
+            equipment=clean_extracted(payload.get("equipment")) or None,
             confidence=float(payload.get("confidence") or candidate.confidence),
             source=source,
         )
@@ -614,24 +899,8 @@ class ApplicationStore:
         if self.graph_sink:
             self.graph_sink.upsert_fact(fact)
 
-    def persist_ontology_candidate(self, candidate: OntologyCandidate) -> None:
-        """Решение по кандидату онтологии переживает рестарт backend-а."""
-        self.ontology_candidates[candidate.id] = candidate
-        if self.postgres_sink:
-            self.postgres_sink.upsert_ontology_candidate(candidate)
-
-
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
-
-
-def _float_or_none(value: Any) -> float | None:
-    if value in (None, ""):
-        return None
-    try:
-        return float(str(value).replace(",", "."))
-    except ValueError:
-        return None
 
 
 def _candidate_quality_issues(payload: dict[str, Any]) -> list[str]:
@@ -671,13 +940,37 @@ def _normalize_effect_direction(value: Any) -> str:
     return aliases.get(text, text or "unknown")
 
 
-def _canonical_text(value: str) -> str:
-    return " ".join(value.strip().lower().replace("ё", "е").split())
+def _is_junk_label(value: str | None) -> bool:
+    # Единый список мусорных подписей — JUNK_VALUES из normalization
+    return str(value or "").strip().casefold().replace("ё", "е") in JUNK_VALUES
 
 
 def _effect_label(fact: Fact) -> str:
-    direction = {"increase": "рост", "decrease": "снижение", "neutral": "без изменений"}.get(
-        fact.effect_direction, fact.effect_direction
-    )
     value = f" {fact.effect_value:g}{fact.effect_unit or ''}" if fact.effect_value is not None else ""
-    return f"{direction}{value}"
+    return f"{direction_label(fact.effect_direction)}{value}"
+
+
+def _claim_label(fact: Fact) -> str:
+    """Короткая подпись узла Claim — суть утверждения: "<property>: <направление>";
+    без извлечённого направления — просто property (без висящего двоеточия);
+    если property не извлечён — начало цитаты источника."""
+    if not _is_junk_label(fact.property):
+        direction = direction_label(_normalize_effect_direction(fact.effect_direction))
+        if direction and direction != "unknown":
+            return f"{fact.property}: {direction}"
+        return fact.property
+    quote = (fact.source.quote or "").strip()
+    if quote:
+        return quote[:40] + ("…" if len(quote) > 40 else "")
+    return fact.id
+
+
+def _claim_title(fact: Fact) -> str:
+    """Полное описание утверждения для data.title узла Claim (тултип UI)."""
+    context = ", ".join(part for part in (fact.material, fact.process) if not _is_junk_label(part))
+    if not _is_junk_label(fact.property):
+        effect = _effect_label(fact).strip()
+        body = f"{fact.property}: {effect}" if effect else fact.property
+    else:
+        body = (fact.source.quote or "").strip() or fact.id
+    return f"{context} — {body}" if context else body

@@ -140,8 +140,111 @@ async def _post(path: str, body: dict, timeout: float, base_url: str | None = No
     raise YandexClientError(f"LLM недоступен: {last_error or 'бюджет времени исчерпан до первой попытки'}", kind=kind)
 
 
+async def _post_stream(path: str, body: dict, timeout: float, base_url: str | None = None,
+                       retries: int | None = None, headers: dict | None = None,
+                       deadline: float | None = None):
+    """Стриминговый аналог _post: асинхронный генератор кусков delta.content.
+
+    Чанки читаются лениво (httpx stream), весь ответ в память не грузится.
+    Ретраи и бюджет — те же, что в _post, но действуют только ДО первого
+    токена: повторная попытка после начала генерации задвоила бы текст,
+    поэтому сбой середины стрима сразу отдаётся исключением наружу.
+    """
+    base = base_url or config.YANDEX_BASE_URL
+    attempts = retries or config.LLM_RETRIES
+    request_headers = _primary_headers() if headers is None else headers
+    started = time.monotonic()
+    last_error: YandexClientError | None = None
+    for attempt in range(attempts):
+        remaining = None if deadline is None else deadline - (time.monotonic() - started)
+        if remaining is not None and remaining < _MIN_ATTEMPT_BUDGET:
+            break
+        request_timeout = timeout if remaining is None else min(timeout, remaining)
+        emitted = False
+        try:
+            async with httpx.AsyncClient(timeout=request_timeout) as client:
+                async with client.stream("POST", f"{base}{path}", headers=request_headers, json=body) as resp:
+                    if resp.status_code in _RETRIABLE:
+                        text = (await resp.aread()).decode("utf-8", errors="replace")
+                        kind = "quota" if resp.status_code == 429 else "unavailable"
+                        last_error = YandexClientError(f"HTTP {resp.status_code}: {text[:300]}", kind=kind)
+                    elif resp.status_code >= 400:
+                        text = (await resp.aread()).decode("utf-8", errors="replace")
+                        kind = "auth" if resp.status_code in (401, 403) else "unavailable"
+                        raise YandexClientError(f"LLM отказал: HTTP {resp.status_code}: {text[:300]}", kind=kind)
+                    else:
+                        async for line in resp.aiter_lines():
+                            line = line.strip()
+                            if not line.startswith("data:"):
+                                continue
+                            payload = line[len("data:"):].strip()
+                            if payload == "[DONE]":
+                                return
+                            try:
+                                chunk = json.loads(payload)
+                            except json.JSONDecodeError:
+                                # keep-alive/мусорная строка не должна валить стрим
+                                continue
+                            choices = chunk.get("choices") or []
+                            delta = ((choices[0].get("delta") or {}).get("content")) if choices else None
+                            if delta:
+                                emitted = True
+                                yield delta
+                        return
+        except (httpx.TimeoutException, httpx.TransportError) as e:
+            if emitted:
+                raise YandexClientError(f"обрыв стрима после первого токена: {e}", kind="unavailable") from e
+            last_error = YandexClientError(str(e), kind="unavailable")
+        if attempt + 1 >= attempts:
+            break
+        delay = min(2 ** attempt, 30)
+        if deadline is not None:
+            remaining = deadline - (time.monotonic() - started)
+            # Сон, после которого не остаётся времени на попытку, бессмыслен
+            if remaining - delay < _MIN_ATTEMPT_BUDGET:
+                break
+        await asyncio.sleep(delay)
+    kind = last_error.kind if last_error else "unavailable"
+    raise YandexClientError(f"LLM недоступен: {last_error or 'бюджет времени исчерпан до первой попытки'}", kind=kind)
+
+
+def _extract_content(data: dict) -> str:
+    """Разбор и валидация нестримового ответа: choices[0].message.content.
+
+    HTTP 200 с пустым/битым телом — такой же отказ провайдера, как 5xx:
+    поднимается YandexClientError(kind='bad_response'), чтобы каскад в chat()
+    успел попробовать запасной сервер, а /health не показал «available».
+    """
+    try:
+        choice = data["choices"][0]
+        message = choice["message"]
+        content = message["content"]
+    except (IndexError, KeyError, TypeError) as e:
+        raise YandexClientError(
+            f"Модель вернула неожиданную структуру ответа (нет choices/message/content): {str(data)[:300]}",
+            kind="bad_response",
+        ) from e
+    if not content or not str(content).strip():
+        # Пустой content — отказ, даже если reasoning_content непустой:
+        # модель «додумалась», но сам ответ так и не выдала
+        reason = "Модель вернула пустой ответ"
+        if choice.get("finish_reason") == "length":
+            reason += " (finish_reason=length: лимит токенов исчерпан"
+            if (message.get("reasoning_content") or "").strip():
+                reason += ", всё ушло на размышления (reasoning_content)"
+            reason += ")"
+        raise YandexClientError(reason, kind="bad_response")
+    return content
+
+
 def _chat_body(messages: list[dict], temperature: float, model: str) -> dict:
     return {"model": model, "messages": messages, "temperature": temperature}
+
+
+def _stream_body(messages: list[dict], temperature: float, model: str) -> dict:
+    body = _chat_body(messages, temperature, model)
+    body["stream"] = True
+    return body
 
 
 async def chat(messages: list[dict], temperature: float = 0.0, model: str | None = None,
@@ -173,6 +276,8 @@ async def chat(messages: list[dict], temperature: float = 0.0, model: str | None
                 timeout=config.LLM_TIMEOUT,
                 deadline=primary_deadline,
             )
+            # Пустой/битый 200 — тоже отказ: статус ставится только после валидации
+            content = _extract_content(data)
             _set_query_model_status("available", "yandex", primary_model)
         except YandexClientError as primary_error:
             if not cascade:
@@ -191,6 +296,7 @@ async def chat(messages: list[dict], temperature: float = 0.0, model: str | None
                     # фолбэку передаётся весь остаток общего бюджета
                     deadline=None if deadline is None else deadline - (time.monotonic() - started),
                 )
+                content = _extract_content(data)
                 _set_query_model_status("available", "fallback", config.FALLBACK_MODEL)
             except YandexClientError as fallback_error:
                 # quota/auth информативнее обезличенного unavailable
@@ -200,10 +306,93 @@ async def chat(messages: list[dict], temperature: float = 0.0, model: str | None
                 )
                 _set_query_model_status("unavailable", "none", None, combined_error)
                 raise combined_error from fallback_error
-    content = data["choices"][0]["message"]["content"]
-    if not content:  # модель может вернуть пустой ответ (обрезка, фильтр)
-        raise YandexClientError("Модель вернула пустой ответ", kind="bad_response")
     return content
+
+
+async def chat_stream(messages: list[dict], temperature: float = 0.0, model: str | None = None,
+                      deadline: float | None = None):
+    """Стриминговый аналог chat() для эндпоинта /chat_stream (контракт К2).
+
+    Асинхронный генератор: события {"delta": <кусок текста>}, затем РОВНО ОДНА
+    терминальная {"done": True, "text", "provider", "error"} — всегда, даже при
+    отказе обоих провайдеров. Каскад на запасной сервер возможен только пока
+    основной не отдал ни одного токена (иначе текст задвоился бы); сбой после
+    первого токена завершает стрим терминальной записью с error и частичным text.
+    Семафор LLM_CONCURRENCY удерживается на всё время стрима; деление бюджета
+    deadline между ступенями — как в chat(). Ключ Яндекса на FALLBACK_BASE_URL
+    не отправляется (см. _fallback_headers).
+    """
+    started = time.monotonic()
+    cascade = bool(config.FALLBACK_BASE_URL)
+    parts: list[str] = []
+    provider = "none"
+    error: YandexClientError | None = None
+    try:
+        async with _CHAT_SEMAPHORE:
+            # Ожидание семафора тратит бюджет вызывающей стороны — доля от остатка
+            if deadline is None:
+                primary_deadline = None
+            else:
+                remaining_budget = deadline - (time.monotonic() - started)
+                primary_deadline = remaining_budget * _PRIMARY_SHARE if cascade else remaining_budget
+            primary_model = config.model_uri(model or config.YANDEX_MODEL)
+            try:
+                async for delta in _post_stream(
+                    "/chat/completions",
+                    _stream_body(messages, temperature, primary_model),
+                    timeout=config.LLM_TIMEOUT,
+                    deadline=primary_deadline,
+                ):
+                    provider = "yandex"
+                    parts.append(delta)
+                    yield {"delta": delta}
+                if not parts:  # HTTP 200, но ни одного токена — как пустой ответ в chat()
+                    raise YandexClientError("Модель вернула пустой ответ", kind="bad_response")
+                _set_query_model_status("available", "yandex", primary_model)
+            except YandexClientError as primary_error:
+                if parts or not cascade:
+                    error = primary_error
+                    _set_query_model_status("unavailable", "none", None, primary_error)
+                else:
+                    log.warning("Основной LLM отказал до первого токена (%s): %s — стрим через запасной %s",
+                                primary_error.kind, primary_error, config.FALLBACK_MODEL)
+                    try:
+                        async for delta in _post_stream(
+                            "/chat/completions",
+                            _stream_body(messages, temperature, config.FALLBACK_MODEL),
+                            timeout=config.LLM_TIMEOUT,
+                            base_url=config.FALLBACK_BASE_URL,
+                            retries=_FALLBACK_RETRIES,
+                            headers=_fallback_headers(),
+                            # фолбэку передаётся весь остаток общего бюджета
+                            deadline=None if deadline is None else deadline - (time.monotonic() - started),
+                        ):
+                            provider = "fallback"
+                            parts.append(delta)
+                            yield {"delta": delta}
+                        if not parts:
+                            raise YandexClientError("Модель вернула пустой ответ", kind="bad_response")
+                        _set_query_model_status("available", "fallback", config.FALLBACK_MODEL)
+                    except YandexClientError as fallback_error:
+                        if parts:
+                            # фолбэк начал отвечать и оборвался: частичный текст уже ушёл
+                            error = fallback_error
+                        else:
+                            # quota/auth информативнее обезличенного unavailable
+                            kind = fallback_error.kind if fallback_error.kind != "unavailable" else primary_error.kind
+                            error = YandexClientError(
+                                f"основной LLM: {primary_error}; запасной LLM: {fallback_error}", kind=kind
+                            )
+                        _set_query_model_status("unavailable", "none", None, error)
+    except Exception as unexpected:  # страховка контракта: терминальная запись обязана уйти
+        log.exception("Непредвиденный сбой стрима LLM")
+        error = YandexClientError(str(unexpected)[:300], kind="unavailable")
+    yield {
+        "done": True,
+        "text": "".join(parts),
+        "provider": provider,
+        "error": None if error is None else {"kind": error.kind, "message": str(error)[:500]},
+    }
 
 
 def parse_json_answer(raw: str) -> dict:

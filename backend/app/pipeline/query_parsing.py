@@ -1,35 +1,26 @@
 from __future__ import annotations
 
-import json
 from typing import Any
 
-from app.schemas import ParsedQuestion, QueryCondition, QueryEntity
+from app.schemas import ONTOLOGY_LABELS, ParsedQuestion, QueryCondition, QueryEntity
 
 # LLM доступна из backend только по HTTP через сервис ml-extraction
 from app.pipeline.llm_bridge import LLMUnavailableError, chat_json
 
-ONTOLOGY_LABELS = [
-    "Material", "Process", "Equipment", "Property", "NumericParameter", "Condition",
-    "Experiment", "Publication", "Expert", "Facility", "Result", "Recommendation", "Region",
-]
-
 SYSTEM_PROMPT = f"""Ты — Query Planner для GraphRAG-системы горно-металлургической отрасли.
 Разбери вопрос пользователя строго в JSON, без пояснений и markdown-обёртки.
 
-Схема ответа (все поля опциональны, кроме intent):
+Схема ответа (все поля опциональны):
 {{
-  "intent": "find_technology" | "compare_experiments" | "list_experiments" | "compare_regions",
   "process": строка или null — технологический процесс из вопроса,
   "material": строка или null — материал/вещество,
   "equipment": строка или null — оборудование,
   "property": строка или null — измеряемое свойство,
   "region": строка или null — страна/регион,
-  "year_from": число или null — нижняя граница года, если спрашивают "за последние N лет",
-  "entities": [{{"type": один из {ONTOLOGY_LABELS}, "name": строка}}],
+  "entities": [{{"type": один из {list(ONTOLOGY_LABELS)}, "name": строка}}],
   "conditions": [{{"parameter": строка, "value_min": число|null, "value_max": число|null, "unit": строка|null}}],
   "target": {{"parameter": строка, "value_min": число|null, "value_max": число|null, "unit": строка|null}} или null
-             — целевой показатель, который нужно обеспечить (например "сухой остаток <=1000 мг/дм3"),
-  "keywords": [строка, ...] — 3-6 ключевых слов для семантического поиска
+             — целевой показатель, который нужно обеспечить (например "сухой остаток <=1000 мг/дм3")
 }}
 
 Правила:
@@ -98,17 +89,14 @@ class LLMQuestionParser:
             material = self.normalizer.normalize_entity(material) or material
 
         return ParsedQuestion(
-            intent=raw.get("intent") or "compare_experiments",
             material=material,
             property=raw.get("property"),
             process=raw.get("process"),
             equipment=raw.get("equipment"),
             region=raw.get("region"),
-            year_from=_int(raw.get("year_from")),
             entities=entities,
             conditions=conditions,
             target=target,
-            keywords=[str(k) for k in (raw.get("keywords") or [])][:6],
         )
 
 
@@ -117,14 +105,5 @@ def _num(value: Any) -> float | None:
         return None
     try:
         return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _int(value: Any) -> int | None:
-    if value in (None, ""):
-        return None
-    try:
-        return int(value)
     except (TypeError, ValueError):
         return None

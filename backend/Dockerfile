@@ -6,12 +6,22 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app/backend
 
+# LibreOffice Writer/Impress + шрифты (кириллица/латиница) — PDF-превью
+# DOCX/PPTX при инжесте (headless soffice --convert-to pdf)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libreoffice-writer \
+        libreoffice-impress \
+        libreoffice-core \
+        fonts-dejavu \
+        fonts-liberation \
+        fonts-noto-core \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY backend/requirements.txt /app/backend/requirements.txt
 RUN pip install --no-cache-dir -r /app/backend/requirements.txt
 
 COPY backend /app/backend
 COPY domain /app/domain
-RUN mkdir -p /app/sample_pdfs
 
 WORKDIR /app/backend
 

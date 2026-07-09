@@ -8,6 +8,7 @@ import json
 import logging
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 
 from app import config, embeddings, web_search, yandex_client
 from app.extractor import extract_fragments
@@ -18,10 +19,13 @@ from app.schemas import (
     ExtractResponse,
     WebAnswerRequest,
     WebAnswerResponse,
+    WebSearchRequest,
+    WebSearchResponse,
 )
 from app.yandex_client import YandexClientError
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+log = logging.getLogger(__name__)
 
 app = FastAPI(title="ML Extraction Service (Yandex AI Studio)", version="0.1.0")
 
@@ -50,14 +54,54 @@ async def chat_json_endpoint(request: dict) -> dict:
     return {"result": result}
 
 
+@app.post("/chat_stream")
+async def chat_stream_endpoint(request: dict) -> StreamingResponse:
+    """Стриминговый доступ к LLM для /ask/stream backend (контракт К2).
+
+    Запрос — как у /chat_json: {"messages": [...], "model": null|str}.
+    Ответ — text/event-stream строками "data: <json>": {"delta": ...} по мере
+    генерации и ровно одна терминальная {"done": true, "text", "provider",
+    "error"} — всегда последняя, даже при отказе обоих провайдеров.
+    """
+    messages = request.get("messages")
+    if not messages:
+        raise HTTPException(status_code=422, detail="messages обязательны")
+    model = request.get("model")
+
+    async def event_stream():
+        terminal_sent = False
+        try:
+            # тот же бюджет CHAT_DEADLINE, что у /chat_json: каскад обязан
+            # начать отвечать до обрыва соединения вызывающей стороной
+            async for event in yandex_client.chat_stream(messages, model=model, deadline=config.CHAT_DEADLINE):
+                terminal_sent = terminal_sent or bool(event.get("done"))
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        except Exception as e:  # страховка контракта: терминальная запись обязана уйти
+            log.exception("Сбой генератора /chat_stream")
+            if not terminal_sent:
+                terminal = {"done": True, "text": "", "provider": "none",
+                            "error": {"kind": "unavailable", "message": str(e)[:300]}}
+                yield f"data: {json.dumps(terminal, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@app.post("/web_search", response_model=WebSearchResponse)
+async def web_search_endpoint(request: WebSearchRequest) -> WebSearchResponse:
+    """Чистый поиск (контракт К3): ddgs по разрешённым доменам + научные API, без LLM."""
+    result = await web_search.search_results(request.question)
+    return WebSearchResponse(**result)
+
+
 @app.post("/web_answer", response_model=WebAnswerResponse)
 async def web_answer(request: WebAnswerRequest) -> WebAnswerResponse:
     """Ответ из внешних источников (разрешённый список доменов). В граф не пишет.
 
     Сам поиск LLM не требует; связная формулировка — через каскад LLM,
     при отказе обеих моделей возвращаются сырые выдержки со ссылками.
+    Если в запросе передана готовая выдача results (К3) — поиск пропускается.
     """
-    result = await web_search.answer_from_web(request.question)
+    result = await web_search.answer_from_web(request.question, results=request.results)
     return WebAnswerResponse(**result)
 
 

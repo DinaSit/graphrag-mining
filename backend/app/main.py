@@ -2,19 +2,21 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import mimetypes
 import os
-import threading
-import time
-from collections import OrderedDict
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
+from typing import Literal
+from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
-import yaml
+from pydantic import BaseModel, Field
 
 try:
-    from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+    from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
     from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.responses import RedirectResponse, Response, StreamingResponse
+    from fastapi.staticfiles import StaticFiles
     from starlette.concurrency import run_in_threadpool
 except ImportError as exc:  # pragma: no cover - helps local smoke tests without installed deps
     raise RuntimeError("Install backend dependencies from backend/requirements.txt to run the API.") from exc
@@ -23,9 +25,18 @@ from app.file_storage import MinioFileStorage
 from app.jobs import IngestQueue
 from app.persistence import Neo4jSink, PostgresSink
 from app.pipeline.query import QueryOrchestrator
-from app.pipeline.llm_bridge import LLM_CHAT_URL
-from app.schemas import CandidateStatus, ExtractionCandidate, QueryRequest, SearchRequest
+from app.pipeline.llm_bridge import LLM_CHAT_URL, LLMUnavailableError, SummaryStreamExtractor, chat_stream
+from app.schemas import (
+    CandidateStatus,
+    DocumentVisibilityRequest,
+    GraphPayload,
+    QueryRequest,
+    QueryResponse,
+    RejectFactRequest,
+)
 from app.storage import ApplicationStore, SourceRequiredError
+
+log = logging.getLogger(__name__)
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -51,15 +62,6 @@ orchestrator = QueryOrchestrator(store)
 # держит сервис извлечения). INGEST_WORKERS=0 возвращает синхронный режим.
 _workers = int(os.getenv("INGEST_WORKERS", "2"))
 ingest_queue = IngestQueue(store, workers=_workers) if _workers > 0 else None
-
-
-def _load_ontology_payload() -> dict[str, str]:
-    ontology_path = DOMAIN_DIR / "ontology.yaml"
-    if not ontology_path.exists():
-        return {"version": "unknown", "path": str(ontology_path), "text": ""}
-    text = ontology_path.read_text(encoding="utf-8")
-    data = yaml.safe_load(text) or {}
-    return {"version": str(data.get("version", "unknown")), "path": str(ontology_path), "text": text}
 
 
 def _llm_health() -> dict[str, str | None]:
@@ -92,11 +94,24 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:8501", "http://127.0.0.1:8501", "*"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# UI — один статический файл backend/ui/index.html (контракт К1); каталог
+# создаётся параллельно другим агентом, его отсутствие не роняет API
+UI_DIR = ROOT_DIR / "backend" / "ui"
+if UI_DIR.is_dir():
+    app.mount("/ui", StaticFiles(directory=str(UI_DIR), html=True), name="ui")
+else:
+    log.warning("UI не смонтирован: каталог %s не найден", UI_DIR)
+
+
+@app.get("/", include_in_schema=False)
+def root() -> RedirectResponse:
+    return RedirectResponse(url="/ui/")
 
 
 @app.get("/health")
@@ -118,90 +133,140 @@ def health() -> dict[str, str | None]:
     return payload
 
 
-# Кэш готовых ответов /ask: повторный и совпадающий вопрос не тратит LLM-вызовы.
-# Ключ — весь запрос, валидность — версия данных store + TTL (веб-ступень стареет)
-_ANSWER_CACHE: OrderedDict[str, tuple[int, float, dict]] = OrderedDict()
-_ANSWER_CACHE_LOCK = threading.Lock()
-_ANSWER_CACHE_MAX = 256
-_ANSWER_CACHE_TTL = float(os.getenv("ANSWER_CACHE_TTL", "1800"))
+class WebAnswerProxyRequest(BaseModel):
+    question: str
 
 
-def _answer_cache_key(request: QueryRequest) -> str:
-    payload = request.model_dump()
-    payload["question"] = request.question.strip().casefold().replace("ё", "е")
-    return json.dumps(payload, sort_keys=True, ensure_ascii=False)
+def _web_answer_failure(reason: str) -> dict:
+    """Единый формат отказа /web/answer: та же схема, что успешный ответ."""
+    return {"found": False, "answer": None, "url": None, "snippets": [], "llm_error": reason}
 
 
-def _answer_cache_get(key: str) -> dict | None:
-    with _ANSWER_CACHE_LOCK:
-        entry = _ANSWER_CACHE.get(key)
-        if entry is None:
-            return None
-        version, stamp, payload = entry
-        if version != store.data_version or time.monotonic() - stamp > _ANSWER_CACHE_TTL:
-            _ANSWER_CACHE.pop(key, None)
-            return None
-        _ANSWER_CACHE.move_to_end(key)
-        return payload
-
-
-def _answer_cache_put(key: str, payload: dict) -> None:
-    with _ANSWER_CACHE_LOCK:
-        _ANSWER_CACHE[key] = (store.data_version, time.monotonic(), payload)
-        _ANSWER_CACHE.move_to_end(key)
-        if len(_ANSWER_CACHE) > _ANSWER_CACHE_MAX:
-            _ANSWER_CACHE.popitem(last=False)
+@app.post("/web/answer")
+async def web_answer(request: WebAnswerProxyRequest) -> dict:
+    """Независимый контур веб-поиска (контракт К1): выполняется ВСЕГДА по
+    явному запросу UI (решение пользователя), а не только когда база не
+    ответила. Прокси в ml-extraction /web_answer; схема ответа 1:1 повторяет
+    WebAnswerResponse сервиса: {"found", "answer", "url", "snippets", "llm_error"}."""
+    web_answer_url = os.getenv("WEB_ANSWER_URL")
+    if not web_answer_url:
+        return _web_answer_failure("веб-поиск не настроен (WEB_ANSWER_URL не задан)")
+    # Запас поверх WEB_ANSWER_TIMEOUT: ml-extraction должен успеть сам оборвать
+    # поиск/LLM по своему таймауту и вернуть структурированную ошибку
+    timeout = float(os.getenv("WEB_ANSWER_TIMEOUT", "20")) + 5.0
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            raw = await client.post(web_answer_url, json={"question": request.question})
+        raw.raise_for_status()
+        payload = raw.json()
+        if not isinstance(payload, dict):
+            raise ValueError("тело ответа не JSON-объект")
+    # Сетевые ошибки и не-JSON тело не превращаются в 500: UI получает
+    # человекочитаемую причину в llm_error
+    except httpx.TimeoutException:
+        return _web_answer_failure(f"веб-поиск не уложился в таймаут {timeout:.0f} с")
+    except (httpx.HTTPError, ValueError) as exc:
+        return _web_answer_failure(f"веб-поиск недоступен: {exc.__class__.__name__}")
+    return {
+        "found": bool(payload.get("found")),
+        "answer": payload.get("answer"),
+        "url": payload.get("url"),
+        "snippets": payload.get("snippets") or [],
+        "llm_error": payload.get("llm_error"),
+    }
 
 
 @app.post("/ask")
 async def ask(request: QueryRequest):
     # Смолток и оффтоп («как дела?») отвечаются мгновенно, без LLM,
-    # графа, эмбеддингов и веб-поиска
+    # графа и эмбеддингов
     if orchestrator.is_offtopic(request.question):
         return orchestrator.offtopic_response()
+    return await orchestrator.answer(request)
 
-    cache_key = _answer_cache_key(request)
-    cached = _answer_cache_get(cache_key)
-    if cached is not None:
-        return cached
 
-    response = await orchestrator.answer(request)
-    web_answer_url = os.getenv("WEB_ANSWER_URL")
-    if web_answer_url and not response.has_direct_facts and not response.offtopic:
-        try:
-            timeout = float(os.getenv("WEB_ANSWER_TIMEOUT", "20"))
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                raw = await client.post(web_answer_url, json={"question": request.question})
-            raw.raise_for_status()
-            web = raw.json()
-            if web.get("found"):
-                response.web_answer = {
-                    "answer": web.get("answer"),
-                    "url": web.get("url"),
-                    "snippets": web.get("snippets") or [],
-                    "llm_error": web.get("llm_error"),
-                }
-        # Веб-ступень факультативна: любой её сбой (таймаут, 5xx, не-JSON тело)
-        # деградирует в обычный ответ из графа, а не в 500
-        except httpx.TimeoutException:
-            response.web_answer = {
-                "answer": None,
-                "url": None,
-                "snippets": [],
-                "llm_error": f"веб-поиск не уложился в таймаут {timeout:.0f} с",
-            }
-        except (httpx.HTTPError, ValueError) as exc:
-            response.web_answer = {
-                "answer": None,
-                "url": None,
-                "snippets": [],
-                "llm_error": f"веб-поиск недоступен: {exc.__class__.__name__}",
-            }
-    # Кэшируются только полноценные ответы: оффтоп и так мгновенный,
-    # а ответ с llm_error — деградация, которую не стоит закреплять
-    if not response.offtopic and response.llm_error is None:
-        _answer_cache_put(cache_key, response.model_dump(mode="json"))
-    return response
+def _sse_event(name: str, payload: dict) -> str:
+    """Формат события контракта К1: "event: <имя>\\ndata: <json одной строкой>\\n\\n"."""
+    return f"event: {name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _parse_llm_json(text: str) -> dict:
+    """Полный текст стрима -> dict как из /chat_json: модель может обернуть
+    JSON в код-блок или добавить хвост вокруг объекта."""
+    candidate = text.strip()
+    if candidate.startswith("```"):
+        candidate = candidate.strip("`").lstrip("json").strip()
+    try:
+        parsed = json.loads(candidate)
+    except ValueError:
+        start = candidate.find("{")
+        end = candidate.rfind("}")
+        if start == -1 or end <= start:
+            raise ValueError("в ответе модели нет JSON-объекта")
+        parsed = json.loads(candidate[start:end + 1])
+    if not isinstance(parsed, dict):
+        raise ValueError("ответ модели не JSON-объект")
+    return parsed
+
+
+async def _ask_stream_events(request: QueryRequest):
+    """SSE-поток контракта К1: "evidence" -> "delta"... -> "final" (всегда последним)."""
+    # Оффтоп: сразу единственное событие final
+    if orchestrator.is_offtopic(request.question):
+        yield _sse_event("final", orchestrator.offtopic_response().model_dump(mode="json"))
+        return
+
+    try:
+        evidence = await orchestrator._collect_evidence(request)
+        yield _sse_event("evidence", orchestrator.evidence_preview(evidence))
+
+        # Дельты наружу — только текст summary: автомат вытаскивает значение
+        # первого ключа из сырого JSON-потока модели
+        extractor = SummaryStreamExtractor()
+        full_text = ""
+        stream_error: LLMUnavailableError | None = None
+        async for event in chat_stream(orchestrator._answer_messages(request.question, evidence.evidence_pack)):
+            if event.get("done"):
+                full_text = event.get("text") or ""
+                stream_error = event.get("error")
+                break
+            piece = extractor.feed(event.get("delta") or "")
+            if piece:
+                yield _sse_event("delta", {"text": piece})
+
+        llm_answer: dict = {}
+        if stream_error is not None:
+            # Сбой стрима (в т.ч. после первого токена): существующая
+            # деградация — summary без LLM + llm_error в финальном ответе
+            evidence.llm_errors.append(stream_error.human())
+        else:
+            try:
+                llm_answer = _parse_llm_json(full_text)
+            except ValueError as exc:
+                evidence.llm_errors.append(LLMUnavailableError("bad_response", str(exc)).human())
+
+        response = orchestrator._finalize(evidence, llm_answer)
+        yield _sse_event("final", response.model_dump(mode="json"))
+    except Exception as exc:  # финальное событие обязано прийти даже при сбое пайплайна
+        fallback = QueryResponse(
+            summary=f"Ответ не собран: внутренняя ошибка стриминга ({exc.__class__.__name__}).",
+            experiments=[],
+            sources=[],
+            graph=GraphPayload(),
+            contradictions=[],
+            gaps=[],
+            confidence=0.0,
+            llm_error=str(exc) or exc.__class__.__name__,
+            evidence_status="none",
+        )
+        yield _sse_event("final", fallback.model_dump(mode="json"))
+
+
+@app.post("/ask/stream")
+async def ask_stream(request: QueryRequest):
+    """Стриминговый вариант /ask (контракт К1): тот же оффтоп-роутер,
+    но summary отдаётся кусками по мере генерации."""
+    return StreamingResponse(_ask_stream_events(request), media_type="text/event-stream")
 
 
 @app.post("/ingest")
@@ -227,17 +292,6 @@ async def ingest(
     return {"job_id": job_id, "filename": filename, "status": "queued"}
 
 
-@app.post("/candidates")
-def add_candidates(candidates: list[ExtractionCandidate]):
-    """Приём готовых кандидатов извне (бэкфилл, ручная разметка).
-
-    Кандидаты проходят штатный путь: валидация чисел по правилам,
-    пороги утверждения, фиксация противоречий, проекция в граф.
-    """
-    accepted = [store.add_candidate(candidate).id for candidate in candidates]
-    return {"accepted": len(accepted)}
-
-
 @app.get("/jobs/{job_id}")
 def job_status(job_id: str):
     """Статус фоновой задачи: {"job_id", "status": queued|processing|completed|failed, "error"}."""
@@ -253,14 +307,13 @@ def job_status(job_id: str):
     return job
 
 
-@app.get("/graph")
-def graph():
-    return store.persistent_graph()
-
-
-@app.get("/facts")
-def facts():
-    return {"facts": store.persistent_facts()}
+@app.get("/facts/random")
+def random_fact():
+    """Один случайный approved-факт из нескрытого документа (фича UI)."""
+    fact = store.random_visible_fact()
+    if fact is None:
+        raise HTTPException(status_code=404, detail="Нет ни одного подходящего факта")
+    return {"fact": fact.model_dump(mode="json")}
 
 
 @app.get("/documents")
@@ -278,12 +331,66 @@ def get_document(document_id: str):
     return {"document": document, "fragments": fragments}
 
 
-@app.get("/documents/{document_id}/status")
-def get_document_status(document_id: str):
+@app.get("/documents/{document_id}/original")
+def get_document_original(document_id: str):
+    """Оригинальный файл из MinIO: PDF отдаётся inline (браузер рендерит),
+    остальные форматы — attachment с исходным именем файла."""
     document = store.documents.get(document_id)
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
-    return {"document_id": document.id, "status": document.status, "element_count": document.element_count}
+    if not store.file_storage or not store.file_storage.enabled:
+        raise HTTPException(status_code=404, detail="Файловое хранилище недоступно, оригинал не получить")
+    try:
+        stored = store.file_storage.get_document(document_id)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Оригинал не получен из MinIO: {exc}")
+    if stored is None:
+        raise HTTPException(status_code=404, detail="Файл документа не найден в хранилище")
+    content, _ = stored
+    filename = document.filename or "document.bin"
+    media_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    is_pdf = filename.lower().endswith(".pdf")
+    if is_pdf:
+        media_type = "application/pdf"
+    disposition = "inline" if is_pdf else "attachment"
+    # RFC 5987: кириллическое имя — в filename*, ASCII-фолбэк — в filename.
+    # Имя файла не должно ломать заголовок: управляющие символы и '/'
+    # выбрасываются, кавычки и бэкслеши в quoted-string экранируются,
+    # в filename* quote(..., safe="") кодирует всё вне attr-char
+    clean_name = "".join(ch for ch in filename if ch.isprintable() and ch != "/") or "document"
+    ascii_name = clean_name.encode("ascii", "ignore").decode() or "document"
+    ascii_name = ascii_name.replace("\\", "\\\\").replace('"', '\\"')
+    header = f"{disposition}; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(clean_name, safe='')}"
+    return Response(content=content, media_type=media_type, headers={"Content-Disposition": header})
+
+
+@app.get("/documents/{document_id}/preview")
+def get_document_preview(document_id: str):
+    """PDF-превью DOCX/PPTX из MinIO (строится LibreOffice при инжесте/бэкфиле):
+    отдаётся inline, браузер рендерит как обычный PDF. 404 — превью нет/недоступно."""
+    document = store.documents.get(document_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if not document.preview_object or not store.file_storage or not store.file_storage.enabled:
+        raise HTTPException(status_code=404, detail="PDF-превью для документа нет")
+    content = store.file_storage.get_object(document.preview_object)
+    if content is None:
+        raise HTTPException(status_code=404, detail="PDF-превью не найдено в хранилище")
+    return Response(
+        content=content,
+        media_type="application/pdf",
+        headers={"Content-Disposition": 'inline; filename="preview.pdf"'},
+    )
+
+
+@app.post("/documents/{document_id}/visibility")
+def set_document_visibility(document_id: str, request: DocumentVisibilityRequest):
+    """Скрывает/показывает документ во всех ответах. Данные не удаляются,
+    Neo4j не перестраивается — фильтрация выполняется на стороне backend."""
+    try:
+        return store.set_document_visibility(document_id, request.hidden)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Document not found")
 
 
 @app.delete("/documents/{document_id}")
@@ -299,106 +406,12 @@ def delete_document(document_id: str):
         raise HTTPException(status_code=500, detail=f"Удаление не завершено: {exc}")
 
 
-@app.post("/documents/{document_id}/reprocess")
-def reprocess_document(document_id: str):
-    document = store.documents.get(document_id)
-    if not document:
-        raise HTTPException(status_code=404, detail="Document not found")
-    if ingest_queue is None:  # синхронный режим (INGEST_WORKERS=0)
-        candidates = store.reprocess_document(document_id)
-        return {"document_id": document_id, "status": "completed", "candidates": candidates}
-    job_id = ingest_queue.enqueue_reprocess(document_id)
-    return {"document_id": document_id, "job_id": job_id, "status": "queued"}
-
-
-@app.post("/search")
-def search(request: SearchRequest):
-    return orchestrator.search(request.query, top_k=request.top_k)
-
-
-@app.post("/query")
-async def query(request: QueryRequest):
-    """Полный алиас /ask: та же логика, включая ступень веб-поиска."""
-    return await ask(request)
-
-
-@app.get("/entities/{entity_id}")
-def get_entity(entity_id: str):
-    # list(): факты добавляются из фоновых воркеров параллельно
-    facts = [
-        fact
-        for fact in list(store.facts.values())
-        if entity_id in {fact.material_id, fact.experiment_id, fact.id, fact.source.fragment_id}
-    ]
-    if not facts:
-        raise HTTPException(status_code=404, detail="Entity not found")
-    return {"entity_id": entity_id, "facts": facts}
-
-
-@app.get("/entities/{entity_id}/graph")
-def get_entity_graph(entity_id: str, depth: int = 2):
-    # Глубина обхода реализуется графовой базой; без Neo4j отдаётся
-    # in-memory окрестность фактов (глубина фиксированная)
-    if store.graph_sink and store.graph_sink.enabled:
-        graph = store.graph_sink.get_entity_graph(entity_id, depth)
-        if graph.nodes:
-            return graph
-    return store.get_graph(entity_id=entity_id)
-
-
-@app.get("/experiments/{experiment_id}")
-def get_experiment(experiment_id: str):
-    facts = [fact for fact in list(store.facts.values()) if fact.experiment_id == experiment_id]
-    if not facts:
-        raise HTTPException(status_code=404, detail="Experiment not found")
-    return {"experiment_id": experiment_id, "facts": facts, "graph": store.get_graph(facts=facts)}
-
-
-@app.get("/ontology")
-def get_ontology():
-    return _load_ontology_payload()
-
-
-@app.get("/ontology/versions")
-def get_ontology_versions():
-    ontology = _load_ontology_payload()
-    return [{"version": ontology["version"], "status": "active", "source": "domain/default/ontology.yaml"}]
-
-
-@app.get("/ontology/candidates")
-def get_ontology_candidates():
-    return list(store.ontology_candidates.values())
-
-
-@app.post("/ontology/candidates/{candidate_id}/approve")
-def approve_ontology_candidate(candidate_id: str):
-    candidate = store.ontology_candidates.get(candidate_id)
-    if not candidate:
-        raise HTTPException(status_code=404, detail="Ontology candidate not found")
-    candidate.status = CandidateStatus.approved
-    store.persist_ontology_candidate(candidate)
-    return candidate
-
-
-@app.post("/ontology/candidates/{candidate_id}/reject")
-def reject_ontology_candidate(candidate_id: str):
-    candidate = store.ontology_candidates.get(candidate_id)
-    if not candidate:
-        raise HTTPException(status_code=404, detail="Ontology candidate not found")
-    candidate.status = CandidateStatus.rejected
-    store.persist_ontology_candidate(candidate)
-    return candidate
-
-
-@app.post("/ontology/candidates/{candidate_id}/merge")
-def merge_ontology_candidate(candidate_id: str, target_type: str):
-    candidate = store.ontology_candidates.get(candidate_id)
-    if not candidate:
-        raise HTTPException(status_code=404, detail="Ontology candidate not found")
-    candidate.status = CandidateStatus.approved
-    candidate.similar_existing_types.append(target_type)
-    store.persist_ontology_candidate(candidate)
-    return candidate
+@app.get("/review/count")
+def review_count():
+    """Число кандидатов, ожидающих проверки эксперта (бейдж в UI)."""
+    # list(): кандидаты добавляются из фоновых воркеров параллельно
+    pending = sum(1 for candidate in list(store.candidates.values()) if candidate.status == CandidateStatus.pending_review)
+    return {"pending": pending}
 
 
 @app.get("/review/facts")
@@ -420,7 +433,45 @@ def approve_fact(candidate_id: str):
 
 
 @app.post("/review/facts/{candidate_id}/reject")
-def reject_fact(candidate_id: str):
+def reject_fact(candidate_id: str, body: RejectFactRequest | None = Body(default=None)):
     if candidate_id not in store.candidates:
         raise HTTPException(status_code=404, detail="Candidate not found")
-    return store.reject_candidate(candidate_id)
+    # Тело необязательно: старые клиенты шлют reject без note
+    return store.reject_candidate(candidate_id, note=body.note if body else None)
+
+
+class BulkReviewRequest(BaseModel):
+    # Лимит 1000: пачка обрабатывается синхронно в одном запросе
+    candidate_ids: list[str] = Field(max_length=1000)
+    action: Literal["approve", "reject"]
+    note: str | None = None
+
+
+@app.post("/review/facts/bulk")
+def bulk_review_facts(body: BulkReviewRequest):
+    """Пакетная проверка кандидатов: ошибка по одному id не прерывает пачку."""
+    processed = 0
+    failed: list[dict[str, str]] = []
+    for candidate_id in body.candidate_ids:
+        candidate = store.candidates.get(candidate_id)
+        if candidate is None:
+            failed.append({"id": candidate_id, "error": "Кандидат не найден"})
+            continue
+        if candidate.status != CandidateStatus.pending_review:
+            failed.append({
+                "id": candidate_id,
+                "error": f"Кандидат уже обработан (статус {candidate.status.value})",
+            })
+            continue
+        try:
+            if body.action == "approve":
+                store.approve_candidate(candidate_id)
+            else:
+                store.reject_candidate(candidate_id, note=body.note)
+        except SourceRequiredError as exc:
+            failed.append({"id": candidate_id, "error": str(exc)})
+        except KeyError:
+            failed.append({"id": candidate_id, "error": "Кандидат не найден"})
+        else:
+            processed += 1
+    return {"processed": processed, "failed": failed}

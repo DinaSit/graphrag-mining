@@ -11,6 +11,7 @@ import urllib.request
 from collections import OrderedDict
 from typing import Any
 
+from app.pipeline.normalization import float_or_none
 from app.schemas import ExtractionCandidate, SourceRef, SourceFragment
 
 
@@ -71,18 +72,18 @@ class MockLLMProvider:
             "experiment_id": row.get("experiment_id") or row.get("эксперимент") or "uploaded-exp",
             "sample": row.get("sample") or row.get("образец") or "uploaded-sample",
             "process": row.get("process") or row.get("режим") or "unknown process",
-            "temperature_c": _float_or_none(row.get("temperature_c") or row.get("temperature")),
-            "duration_h": _float_or_none(row.get("duration_h") or row.get("duration")),
+            "temperature_c": float_or_none(row.get("temperature_c") or row.get("temperature")),
+            "duration_h": float_or_none(row.get("duration_h") or row.get("duration")),
             "property": property_name,
             "effect_direction": row.get("effect_direction") or row.get("effect") or "unknown",
-            "effect_value": _float_or_none(row.get("effect_value")),
+            "effect_value": float_or_none(row.get("effect_value")),
             "effect_unit": row.get("effect_unit") or "%",
-            "result_value": _float_or_none(row.get("result_value")),
+            "result_value": float_or_none(row.get("result_value")),
             "result_unit": row.get("result_unit") or row.get("unit"),
             "lab": row.get("lab") or row.get("laboratory") or "Unknown Lab",
             "team": row.get("team") or "Unknown Team",
             "equipment": row.get("equipment") or "unknown equipment",
-            "confidence": _float_or_none(row.get("confidence")) or 0.86,
+            "confidence": float_or_none(row.get("confidence")) or 0.86,
         }
 
     def _payload_from_text(self, text: str) -> dict[str, Any] | None:
@@ -111,15 +112,6 @@ class MockLLMProvider:
             "equipment": "unknown equipment",
             "confidence": 0.84,
         }
-
-
-def _float_or_none(value: Any) -> float | None:
-    if value in (None, ""):
-        return None
-    try:
-        return float(str(value).replace(",", "."))
-    except ValueError:
-        return None
 
 
 class RemoteEmbeddingProvider:

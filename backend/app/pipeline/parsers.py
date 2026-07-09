@@ -7,6 +7,7 @@ import re
 from collections.abc import Iterable
 from typing import Protocol
 
+from app.pipeline.normalization import slug
 from app.schemas import SourceFragment
 
 try:
@@ -81,12 +82,50 @@ def split_text_blocks(text: str, max_chars: int = 3500) -> list[str]:
     return blocks
 
 
+def merge_short_blocks(blocks: list[str], min_chars: int = 60) -> list[str]:
+    """Короткие блоки (заголовок, строка оглавления, номер страницы) не живут
+    поодиночке: блок короче min_chars приклеивается к СЛЕДУЮЩЕМУ (заголовок —
+    контекст абзаца) через перенос строки; если следующего нет — к предыдущему;
+    совсем пустые пропускаются. Общий помощник для PlainText/Pdf/Pptx-путей —
+    тонкая обёртка над _merge_short_with_sections без разделов."""
+    return [block for block, _ in _merge_short_with_sections([(block, "") for block in blocks], min_chars)]
+
+
+def _merge_short_with_sections(pairs: list[tuple[str, str]], min_chars: int = 60) -> list[tuple[str, str]]:
+    """Склейка коротких блоков, где каждый блок несёт свой раздел (section).
+    Склеенный фрагмент получает раздел содержательного (якорного) блока —
+    того, к которому приклеились короткие заголовки/строки перед ним."""
+    cleaned = [(block.strip(), section) for block, section in pairs if block and block.strip()]
+    if not cleaned:
+        return []
+    result: list[tuple[str, str]] = []
+    pending = ""  # накопленные короткие блоки, ждущие следующего содержательного
+    for block, section in cleaned:
+        if pending:
+            block = f"{pending}\n{block}"
+            pending = ""
+        if len(block) < min_chars:
+            pending = block
+            continue
+        result.append((block, section))
+    if pending:
+        # Хвост коротких блоков без следующего — к предыдущему, иначе сам по себе
+        if result:
+            last_block, last_section = result[-1]
+            result[-1] = (f"{last_block}\n{pending}", last_section)
+        else:
+            result.append((pending, cleaned[-1][1]))
+    return result
+
+
 class PlainTextParser:
     name = "plain-text"
 
     def parse(self, document_id: str, version_id: str, filename: str, content: bytes) -> list[SourceFragment]:
         text = decode_text(content)
-        blocks = split_text_blocks(text)
+        # Короткие блоки (заголовок, строка оглавления) не становятся отдельными
+        # фрагментами — приклеиваются к соседнему содержательному
+        blocks = merge_short_blocks(split_text_blocks(text))
         return [
             SourceFragment(
                 id=f"fragment-{document_id}-{index + 1}",
@@ -251,7 +290,7 @@ class PdfParser:
                             image_b64 = None
                     if not text:
                         text = f"PDF page {page_index} has no text layer; visual OCR adapter is required."
-                blocks = split_text_blocks(text) or [text]
+                blocks = merge_short_blocks(split_text_blocks(text)) or [text]
                 for block_index, block in enumerate(blocks, start=1):
                     metadata = {
                         "filename": filename,
@@ -296,10 +335,16 @@ class DocxParser:
             )
 
         fragments: list[SourceFragment] = []
-        section = "DOCX evidence unit"
         # У DOCX нет страниц: адрес фрагмента — единый сквозной номер блока,
         # общий для абзацев и табличных строк (иначе адреса конфликтуют)
         block_index = 0
+        # Абзацы сначала собираются в плоский список блоков, затем короткие
+        # (заголовок «Введение», строка оглавления) приклеиваются к следующему
+        # содержательному — заголовок становится контекстом абзаца, а не
+        # отдельным фрагментом. Раздел каждого блока запоминается параллельно и
+        # переносится на склеенный фрагмент.
+        raw: list[tuple[str, str]] = []  # (block, section)
+        section = "DOCX evidence unit"
         for paragraph in document.paragraphs:
             text = paragraph.text.strip()
             if not text:
@@ -308,26 +353,27 @@ class DocxParser:
             if style_name.lower().startswith("heading"):
                 section = text[:180]
             for block in split_text_blocks(text):
-                block_index += 1
-                fragments.append(
-                    SourceFragment(
-                        id=f"fragment-{document_id}-docx-p{block_index}",
-                        document_id=document_id,
-                        version_id=version_id,
-                        page=block_index,
-                        element_type="docx_paragraph",
-                        section=section,
-                        text=block,
-                        normalized_text=normalize_text(block),
-                        metadata={
-                            "filename": filename,
-                            "paragraph": block_index,
-                            "style": style_name,
-                            "evidence_unit": True,
-                            "parser": self.name,
-                        },
-                    )
+                raw.append((block, section))
+        for block, block_section in _merge_short_with_sections(raw):
+            block_index += 1
+            fragments.append(
+                SourceFragment(
+                    id=f"fragment-{document_id}-docx-p{block_index}",
+                    document_id=document_id,
+                    version_id=version_id,
+                    page=block_index,
+                    element_type="docx_paragraph",
+                    section=block_section,
+                    text=block,
+                    normalized_text=normalize_text(block),
+                    metadata={
+                        "filename": filename,
+                        "paragraph": block_index,
+                        "evidence_unit": True,
+                        "parser": self.name,
+                    },
                 )
+            )
 
         for table_index, table in enumerate(document.tables, start=1):
             for row_index, row in enumerate(table.rows, start=1):
@@ -381,25 +427,51 @@ class PptxParser:
 
         fragments: list[SourceFragment] = []
         for slide_index, slide in enumerate(presentation.slides, start=1):
-            shape_texts = list(_slide_texts(slide.shapes))
-            text = "\n\n".join(shape_texts).strip()
-            if not text:
-                continue
-            for block_index, block in enumerate(split_text_blocks(text), start=1):
+            # Один фрагмент на СЛАЙД: заголовок и все текстовые шейпы склеиваются
+            # переносом строки (заголовок и строки оглавления больше не плодят
+            # отдельные фрагменты). Слайд длиннее 3500 симв. режется, но короткие
+            # строки не живут поодиночке (merge_short_blocks).
+            shape_texts = list(_slide_text_shapes(slide.shapes))
+            slide_text = "\n".join(shape_texts).strip()
+            block_index = 0
+            if slide_text:
+                for block in merge_short_blocks(split_text_blocks(slide_text)) or [slide_text]:
+                    block_index += 1
+                    fragments.append(
+                        SourceFragment(
+                            id=f"fragment-{document_id}-pptx-s{slide_index}-{block_index}",
+                            document_id=document_id,
+                            version_id=version_id,
+                            page=slide_index,
+                            element_type="pptx_slide_text",
+                            section=f"PPTX slide {slide_index}",
+                            text=block,
+                            normalized_text=normalize_text(block),
+                            metadata={
+                                "filename": filename,
+                                "slide": slide_index,
+                                "block": block_index,
+                                "evidence_unit": True,
+                                "parser": self.name,
+                            },
+                        )
+                    )
+            # Таблицы слайда — отдельными табличными фрагментами (как раньше)
+            for row_index, row_text in enumerate(_slide_table_rows(slide.shapes), start=1):
                 fragments.append(
                     SourceFragment(
-                        id=f"fragment-{document_id}-pptx-s{slide_index}-{block_index}",
+                        id=f"fragment-{document_id}-pptx-s{slide_index}-t{row_index}",
                         document_id=document_id,
                         version_id=version_id,
                         page=slide_index,
-                        element_type="pptx_slide_text",
-                        section=f"PPTX slide {slide_index}",
-                        text=block,
-                        normalized_text=normalize_text(block),
+                        element_type="pptx_table_row",
+                        section=f"PPTX slide {slide_index} table",
+                        text=row_text,
+                        normalized_text=normalize_text(row_text),
                         metadata={
                             "filename": filename,
                             "slide": slide_index,
-                            "block": block_index,
+                            "row": row_index,
                             "evidence_unit": True,
                             "parser": self.name,
                         },
@@ -441,8 +513,8 @@ class BinaryPlaceholderParser:
         ]
 
 
-# Единственный источник правды по поддерживаемым форматам: и выбор парсера,
-# и проверка расширения идут через этот реестр
+# Единственный источник правды по поддерживаемым форматам:
+# выбор парсера идёт через этот реестр
 _PARSER_BY_EXTENSION: dict[str, type] = {
     ".csv": CsvParser,
     ".xlsx": XlsxParser,
@@ -455,8 +527,6 @@ _PARSER_BY_EXTENSION: dict[str, type] = {
     ".md": PlainTextParser,
     ".json": PlainTextParser,
 }
-
-SUPPORTED_EXTENSIONS = set(_PARSER_BY_EXTENSION)
 
 
 def choose_parser(filename: str) -> Parser:
@@ -472,10 +542,6 @@ def extension_of(filename: str) -> str:
     return match.group(1) if match else ""
 
 
-def is_supported_file(filename: str) -> bool:
-    return extension_of(filename) in SUPPORTED_EXTENSIONS
-
-
 def _unique_headers(raw: list[str]) -> list[str]:
     headers: list[str] = []
     seen: dict[str, int] = {}
@@ -488,20 +554,29 @@ def _unique_headers(raw: list[str]) -> list[str]:
 
 
 def _slug_id(value: str) -> str:
-    cleaned = "".join(char.lower() if char.isalnum() else "-" for char in value.strip())
-    return "-".join(part for part in cleaned.split("-") if part) or "sheet"
+    # Общий slug плюс фолбэк: имя листа из одних спецсимволов не даёт пустой id
+    return slug(value) or "sheet"
 
 
-def _slide_texts(shapes: Iterable) -> Iterable[str]:
+def _slide_text_shapes(shapes: Iterable) -> Iterable[str]:
+    """Текст всех текстовых шейпов слайда (заголовок и прочие), без таблиц —
+    они идут отдельными табличными фрагментами."""
     for shape in shapes:
         if getattr(shape, "has_text_frame", False):
             text = "\n".join(paragraph.text for paragraph in shape.text_frame.paragraphs).strip()
             if text:
                 yield text
+        if hasattr(shape, "shapes"):
+            yield from _slide_text_shapes(shape.shapes)
+
+
+def _slide_table_rows(shapes: Iterable) -> Iterable[str]:
+    """Строки всех таблиц слайда (в т.ч. вложенных в группы)."""
+    for shape in shapes:
         if getattr(shape, "has_table", False):
             for row in shape.table.rows:
                 row_text = " | ".join(cell.text.strip().replace("\n", " ") for cell in row.cells if cell.text.strip())
                 if row_text:
                     yield row_text
         if hasattr(shape, "shapes"):
-            yield from _slide_texts(shape.shapes)
+            yield from _slide_table_rows(shape.shapes)

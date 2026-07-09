@@ -1,0 +1,2812 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GraphRAG — энциклопедия R&amp;D</title>
+<style>
+  /* Токены продукта (V1) — из утверждённого макета */
+  :root{
+    --w-bg:#101418; --w-panel:#141a20; --w-panel2:#0c0f12; --w-line:#232a31; --w-line2:#2b333b;
+    --w-ink:#e7eaee; --w-body:#cfd6dd; --w-mut:#93a0ad; --w-dim:#5b6672;
+    --w-link:#7fa8e8; --w-ok:#78c297; --w-warn:#d9a441; --w-red:#e5534b;
+    /* единая колоночная сетка шапки и статьи.
+       Контейнер fluid: --page-max:100% превращает calc((100% - max)/2 + pad) в pad,
+       поэтому боковые поля страницы всегда равны --page-pad с обеих сторон */
+    --toc-w:157px; --info-w:248px; --col-gap:38px; --page-max:100%; --page-pad:38px;
+    /* высота шапки: держится в актуальном состоянии из JS (ResizeObserver) */
+    --hdr-h:58px;
+    /* левый край контента docs/review = вертикаль окна поиска шапки и текста статьи:
+       поле страницы + колонка оглавления + межколоночный зазор + 39px (1px палки + 38px отступа статьи) */
+    --content-x:calc(var(--page-pad) + var(--toc-w) + var(--col-gap) + 39px);
+  }
+  *{box-sizing:border-box}
+  [hidden]{display:none !important}
+  html,body{margin:0;background:var(--w-bg);color:var(--w-ink);
+    font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+  a{color:var(--w-link)}
+  button{font:inherit;color:inherit;background:none;border:0;cursor:pointer;padding:0}
+  :focus-visible{outline:2px solid var(--w-link);outline-offset:2px;border-radius:4px}
+  input{font:inherit}
+  sup{line-height:0}
+
+  /* ---------- шапка ---------- */
+  /* overflow:visible обязателен: внутри шапки живут кружок статуса на нижней линии
+     и поповеры (статус, загрузки) — их нельзя обрезать */
+  .hdr{position:sticky;top:0;z-index:20;overflow:visible;display:flex;align-items:center;gap:12px 22px;flex-wrap:wrap;
+    padding:11px 26px;border-bottom:1px solid var(--w-line);background:var(--w-panel2)}
+  .logo{font-family:Georgia,serif;font-size:20.5px;font-weight:700;white-space:nowrap;color:var(--w-ink);text-decoration:none}
+  .logo span{color:var(--w-link)}
+  .nav-item{position:relative;font-size:13.5px;color:var(--w-mut);white-space:nowrap;text-decoration:none}
+  /* якорные состояния браузера не должны перекрашивать пункты меню: цвет и отсутствие
+     подчёркивания фиксируем явно, чтобы «Ответ» ничем не отличался от «Документы» */
+  .nav-item:link,.nav-item:visited{color:var(--w-mut);text-decoration:none}
+  .nav-item:hover{color:var(--w-ink)}
+  .nav-item.dimmed{color:#3d4854;cursor:default}
+  .nav-item.dimmed:hover{color:#3d4854}
+  .nav-item.cur{color:var(--w-link)}
+  .ndot{position:absolute;top:-3px;right:-9px;background:var(--w-red);border-radius:50%;width:7px;height:7px}
+  .hcenter{display:flex;align-items:center;gap:12px 22px;flex:1;min-width:180px}
+  .hsearch{flex:1;min-width:180px;max-width:520px;background:#171c21;border:1px solid var(--w-line2);border-radius:8px;
+    padding:0;display:flex;align-items:center}
+  .hsearch input{flex:1;background:none;border:0;outline:none;color:var(--w-ink);font-size:13.5px;padding:7px 0 7px 14px}
+  .hsearch input::placeholder{color:var(--w-mut)}
+  /* лупа в правом краю инпута: символ без кнопочной обёртки, клик = поиск */
+  .sicon{display:inline-flex;align-items:center;align-self:stretch;color:var(--w-dim);padding:0 12px;cursor:pointer}
+  .sicon:hover{color:var(--w-link)}
+  .sicon svg{display:block}
+  .hright{margin-left:auto;display:flex;align-items:center;gap:20px;flex-wrap:wrap}
+  /* на широких экранах шапка — та же сетка, что и статья: вертикали совпадают.
+     3-я колонка auto: правый край блока = правому краю контента (= правому краю инфобокса) */
+  @media (min-width:981px){
+    .hdr{display:grid;grid-template-columns:var(--toc-w) minmax(0,1fr) auto;column-gap:var(--col-gap);
+      padding-left:max(var(--page-pad),calc((100% - var(--page-max))/2 + var(--page-pad)));
+      padding-right:max(var(--page-pad),calc((100% - var(--page-max))/2 + var(--page-pad)))}
+    /* 39px = 1px палки + 38px padding-left статьи: левый край окна поиска = левому краю текста */
+    .hcenter{padding-left:39px}
+    .hright{grid-column:3;margin-left:0;justify-self:end}
+  }
+  @media (max-width:640px){
+    .hdr{padding:10px 14px}
+    .hright{margin-left:0}
+    .upl span:not(.ic){display:none} /* на узком экране остаётся только ⇪ */
+  }
+  .upl{position:relative;display:flex;align-items:center;gap:9px;border:1px dashed #3a4756;border-radius:9px;
+    padding:6px 14px;font-size:12.5px;color:var(--w-mut);white-space:nowrap;cursor:pointer}
+  .upl b{color:var(--w-ink);font-weight:600}
+  .upl .ic{display:inline-flex;color:var(--w-link);margin-top:3px} /* облачко чуть крупнее текста — опускаем к оптической середине плашки */
+  .upl .ic svg{display:block}
+  .upl.dragging{border-color:var(--w-link);background:rgba(127,168,232,.08)}
+  .uplpop{position:absolute;top:calc(100% + 8px);right:0;width:300px;background:#151b22;border:1px solid var(--w-line2);
+    border-radius:11px;padding:11px 14px;font-size:12.5px;z-index:30;box-shadow:0 18px 44px rgba(0,0,0,.55)}
+  .uplpop .t{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--w-dim);margin-bottom:8px}
+  .uplpop .u-row{display:flex;gap:10px;padding:4px 0;color:var(--w-body);align-items:baseline}
+  .uplpop .u-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .uplpop .u-st{color:var(--w-dim);white-space:nowrap;font-size:11.5px}
+  .uplpop .u-st.ok{color:var(--w-ok)}
+  .uplpop .u-st.err{color:var(--w-red)}
+  .uplpop .u-err{flex-basis:100%;color:var(--w-red);font-size:11px}
+
+  /* ---------- статус-кружок ---------- */
+  /* живёт ВНУТРИ липкой шапки: absolute от неё, bottom:-6px при высоте 11px —
+     центр кружка ровно на нижней линии шапки на любой её высоте и любом экране */
+  .sysdot{position:absolute;bottom:-6px;right:18px;width:11px;height:11px;border-radius:50%;
+    background:var(--w-ok);box-shadow:0 0 0 4px rgba(120,194,151,.14);z-index:25;cursor:pointer;border:0}
+  .sysdot.warn{background:var(--w-warn);box-shadow:0 0 0 4px rgba(217,164,65,.14)}
+  .sysdot.bad{background:var(--w-red);box-shadow:0 0 0 4px rgba(229,83,75,.16)}
+  .sysdot.changed{animation:pulse 1s ease-out 2}
+  @keyframes pulse{0%{transform:scale(1)}50%{transform:scale(1.5)}100%{transform:scale(1)}}
+  /* поповер статуса — тоже внутри шапки, открывается вниз под кружком */
+  .syspop{position:absolute;top:calc(100% + 10px);right:18px;width:262px;background:#151b22;border:1px solid var(--w-line2);
+    border-radius:11px;padding:13px 15px;font-size:12.5px;z-index:26;box-shadow:0 18px 44px rgba(0,0,0,.55)}
+  .syspop .t{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--w-dim);margin-bottom:9px}
+  .syspop .row{display:flex;align-items:center;gap:9px;padding:4px 0;color:var(--w-body)}
+  .syspop .row i{width:7px;height:7px;border-radius:50%;background:var(--w-ok);flex:none}
+  .syspop .row i.warn{background:var(--w-warn)}
+  .syspop .row i.bad{background:var(--w-red)}
+  .syspop .row span{margin-left:auto;color:var(--w-dim);font-size:11.5px;text-align:right;max-width:150px;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .syspop .ft{border-top:1px solid var(--w-line);margin-top:9px;padding-top:8px;color:var(--w-dim);font-size:11px}
+
+  /* ---------- главная ---------- */
+  /* главная целиком в высоте окна (минус шапка): без page-скролла на обычных экранах.
+     Композиция ПРИКРЕПЛЕНА к краям: верхний спейсер ФИКСИРОВАННЫЙ (96px от шапки) —
+     заголовок и поиск стоят намертво с первого кадра и не двигаются, когда асинхронно
+     доезжают данные («Знаете ли вы?», недавнее); нижний спейсер тоже фиксированный
+     (28px) — нижняя группа (факт + коробки + подпись) прижата к низу окна.
+     Гибкий ТОЛЬКО средний спейсер: всё дыхание — между поиском и коробками */
+  .home{height:calc(100vh - var(--hdr-h));padding:0 24px;display:flex;flex-direction:column;align-items:center}
+  .home>*{flex:0 0 auto} /* контентные блоки не сжимаются — при нехватке места честный overflow */
+  .home .sp-t{flex:0 0 96px;min-height:96px}
+  .home .sp-m{flex:1 1 24px;min-height:24px}
+  .home .sp-b{flex:0 0 28px;min-height:28px}
+  /* совсем низкое окно: высоту не фиксируем — обычный скролл страницы, ничего не обрезается */
+  @media (max-height:700px){.home{height:auto;min-height:calc(100vh - var(--hdr-h));padding:26px 24px 30px}}
+  /* заголовок чуть уже строки поиска (600px), одной строкой */
+  .home .big{font-family:Georgia,serif;font-size:37px;margin-bottom:26px;text-align:center;line-height:1.2;white-space:nowrap}
+  @media (max-width:700px){.home .big{font-size:30px;white-space:normal}}
+  .home .big span{color:var(--w-link)}
+  .home .search{width:100%;max-width:600px;background:#171c21;border:1px solid #34404d;border-radius:12px;
+    display:flex;align-items:center;box-shadow:0 12px 34px rgba(0,0,0,.35)}
+  .home .search input{flex:1;background:none;border:0;outline:none;color:var(--w-ink);font-size:15.5px;padding:14px 20px}
+  .home .search input::placeholder{color:var(--w-mut)}
+  .home .cols{display:grid;grid-template-columns:1fr 1fr;gap:22px;max-width:820px;width:100%}
+  .card{background:var(--w-panel);border:1px solid var(--w-line2);border-radius:11px;padding:9px 17px}
+  .card .t{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--w-dim);margin-bottom:4px}
+  .card a,.card button.lnk{color:var(--w-link);font-size:13.5px;padding:2px 0;text-decoration:none;text-align:left}
+  /* КЛЭМП: длинный пункт (в т.ч. длиннее двух строк) обрезается по 2 строкам, коробка
+     НЕ растёт — высота «Популярных статей» и «Недавнего» стабильна независимо от текста.
+     Клип по max-height (а не -webkit-line-clamp): <button> в Chromium принудительно
+     сбрасывает display:-webkit-box в flow-root, и line-clamp не работает; block+max-height
+     режет ровно по 2 строкам на любом элементе. Троеточия нет — «просто скрыть лишнее».
+     max-height = 2×line-height (2.9em) + 4px вертикального padding (box-sizing:border-box) */
+  .card a,.card button.lnk{display:block;line-height:1.45;max-height:calc(2.9em + 4px);overflow:hidden}
+  /* высота под факт зарезервирована с первого кадра (пустой плейсхолдер той же
+     геометрии, но без видимой рамки): приход /facts/random не двигает ни коробки,
+     ни подпись под ними — нижняя группа стоит на месте с первого кадра */
+  .dyk{grid-column:1 / -1;border-left:3px solid var(--w-link);min-height:118px}
+  .dyk.dyk-empty{border-left-color:transparent;background:transparent}
+  .dyk .fact{font-family:Georgia,serif;font-size:16px;line-height:1.6;color:var(--w-body)}
+  .dyk .fact b{color:var(--w-ink)}
+  .dyk .src{font-size:12px;color:var(--w-dim);margin-top:8px}
+  .dyk .src button.lnk{display:inline;color:var(--w-link);padding:0;font-size:12px}
+  .card button.lnk.recent-q{color:var(--w-mut)}
+  .home .corp{margin-top:22px;font-size:12.5px;color:var(--w-dim)}
+  @media (max-width:900px){.home .cols{grid-template-columns:1fr}}
+
+  /* ---------- статья ---------- */
+  /* Экран статьи: страница НЕ скроллится — сетка [содержание][скролл-обёртка] занимает
+     всё пространство под липкой шапкой. Скроллится ТОЛЬКО обёртка .artwrap (внутри неё
+     свой грид [текст][инфобокс]) — обёртка дотянута до САМОГО правого края окна
+     (padding-right:0 у сетки), поэтому её скроллбар прижат к краю вьюпорта;
+     правое поле страницы (--page-pad) переехало ВНУТРЬ обёртки (padding-right),
+     так что правый край инфобокса остаётся на прежней вертикали (= правый край
+     плашки «Загрузить документы»). Содержание статично слева, инфобокс sticky
+     внутри обёртки — визуально неподвижен при скролле. */
+  .cols3{display:grid;grid-template-columns:var(--toc-w) minmax(0,1fr);gap:var(--col-gap);
+    height:calc(100vh - var(--hdr-h));
+    padding:0 0 0 var(--page-pad);max-width:var(--page-max);margin:0 auto}
+  .cols3>*{min-width:0} /* иначе таблицы растягивают колонку шире вьюпорта */
+  /* padding-left:11px + margin-left:-11px — чтобы маркер активного пункта (.on, margin-left:-11px)
+     не срезался overflow-y */
+  .toc{font-size:13px;padding:24px 12px 24px 11px;margin-left:-11px;overflow-y:auto;scrollbar-width:thin}
+  .toc::-webkit-scrollbar,.infobox::-webkit-scrollbar,.artwrap::-webkit-scrollbar{width:5px}
+  .toc::-webkit-scrollbar-thumb,.infobox::-webkit-scrollbar-thumb,.artwrap::-webkit-scrollbar-thumb{
+    background:var(--w-line2);border-radius:3px}
+  /* скролл-обёртка «текст + инфобокс»: единственный скролл-контейнер статьи.
+     Разделительная палка на её левом краю — на краю скролл-контейнера она всегда
+     во всю высоту вьюпорта; текст статьи в 38px от неё (padding-left статьи).
+     padding-right = --page-pad: контент кончается на прежней вертикали,
+     а сам контейнер (и его бегунок) — у правого края окна */
+  .artwrap{border-left:1px solid var(--w-line);overflow-y:auto;scrollbar-width:thin;
+    padding-right:var(--page-pad);
+    display:grid;grid-template-columns:minmax(0,1fr) var(--info-w);column-gap:var(--col-gap);
+    align-items:start}
+  .artwrap>article{min-width:0;padding:24px 12px 44px 38px}
+  @media (max-width:980px){ /* узкий экран: колонки складываются, скроллит сама страница */
+    .cols3{grid-template-columns:1fr;height:auto;padding:24px var(--page-pad) 44px}
+    .toc{overflow:visible;padding-top:0;padding-bottom:0}
+    .artwrap{display:block;border-left:0;overflow:visible;padding-right:0}
+    .artwrap>article{padding:0}
+  }
+  .toc .t{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--w-dim);margin-bottom:10px}
+  /* геометрия пункта постоянна: место под маркер (border 2px + padding 9px, сдвиг -11px)
+     зарезервировано у ВСЕХ пунктов заранее; ширина +11px компенсирует сдвиг, чтобы полоса
+     текста не сузилась. .on только красит — активация не двигает текст и не вызывает переносов */
+  .toc button{display:block;width:calc(100% + 11px);text-align:left;padding:3.5px 0 3.5px 9px;
+    margin-left:-11px;border-left:2px solid transparent;color:var(--w-mut);text-decoration:none}
+  .toc button.on{color:var(--w-link);border-left-color:var(--w-link)}
+  .toc button.off{color:#39424c;cursor:default}
+  .toc i{font-style:normal;color:var(--w-dim);font-size:11.5px}
+  /* якоря оглавления: скролл-контейнер статьи начинается ПОД шапкой,
+     поэтому отступ якорей — только «дыхание» от верха колонки */
+  #artbody,#sec-rest>div{scroll-margin-top:14px}
+  /* на узком экране скроллит страница — якоря не должны нырять под липкую шапку */
+  @media (max-width:980px){#artbody,#sec-rest>div{scroll-margin-top:calc(var(--hdr-h) + 14px)}}
+  h1.art{font-family:Georgia,serif;font-size:25px;font-weight:400;margin:0;line-height:1.28;
+    border-bottom:1px solid var(--w-line2);padding-bottom:12px;text-wrap:balance;overflow-wrap:anywhere}
+  /* строка заголовка: title + иконка-глобус (переключатель веб-ответа) на одном уровне;
+     нижняя линия переезжает с h1 на строку, чтобы дотягиваться и под иконку */
+  .trow{display:flex;align-items:flex-start;gap:12px;border-bottom:1px solid var(--w-line2);padding-bottom:12px}
+  .trow h1.art{border-bottom:0;padding-bottom:0;flex:1;min-width:0}
+  /* глобус в стиле лупы: приглушённый stroke, голубой ховер; активное состояние подсвечено */
+  .gicon{display:inline-flex;color:var(--w-dim);cursor:pointer;padding:5px;margin-top:3px;border-radius:7px;flex:none}
+  .gicon:hover{color:var(--w-link)}
+  .gicon.on{color:var(--w-link);background:rgba(127,168,232,.14);box-shadow:inset 0 0 0 1px #34404d}
+  .gicon svg{display:block}
+  /* веб-режим: содержание целиком приглушено и некликабельно */
+  .toc.webdim{opacity:.35;pointer-events:none}
+  .meta{font-size:12px;color:var(--w-dim);margin:8px 0 14px}
+  .meta button.mlink{color:var(--w-link);text-decoration:underline dotted;text-underline-offset:3px}
+  /* контентные блоки статьи без капов ширины: занимают центральную колонку целиком до инфобокса */
+  .p{font-size:15px;line-height:1.78;color:var(--w-body);margin:0 0 13px;overflow-wrap:anywhere}
+  .ref{color:var(--w-link);font-size:11px;text-decoration:none;cursor:pointer}
+  /* секции статьи «дышат» по вертикали так же, как боковые поля (~40px) */
+  .sec-h{font-family:Georgia,serif;font-size:18px;border-bottom:1px solid var(--w-line2);
+    padding-bottom:6px;margin:40px 0 14px;font-weight:400}
+  .conflict{border-left:3px solid var(--w-warn);background:#1a1710;padding:10px 14px;font-size:13.5px;
+    color:#cbb98a;border-radius:0 6px 6px 0;margin-bottom:8px}
+  .llmerr{border-left:3px solid var(--w-warn);background:#1a1710;padding:7px 12px;font-size:12.5px;
+    color:#cbb98a;border-radius:0 6px 6px 0;margin:0 0 14px}
+  .gap{color:var(--w-mut);font-size:14px;padding-left:14px;position:relative;margin-bottom:6px}
+  .gap::before{content:"○";position:absolute;left:0;color:var(--w-dim)}
+  .hyp{font-style:italic;color:#a8b3bf;font-size:14.5px}
+  .hyp .mark{font-style:normal;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--w-dim);
+    border:1px solid var(--w-line2);border-radius:4px;padding:1px 7px;margin-right:8px;white-space:nowrap}
+  .tblwrap{overflow-x:auto;max-width:100%}
+  table.exp{width:100%;border-collapse:collapse;font-size:12.5px;font-variant-numeric:tabular-nums}
+  .exp th{text-align:left;font-size:10.5px;letter-spacing:.07em;text-transform:uppercase;color:var(--w-dim);
+    padding:7px 10px;border-bottom:1px solid var(--w-line2);font-weight:600;white-space:nowrap}
+  .exp td{padding:7px 10px;border-bottom:1px solid var(--w-line);color:var(--w-body)}
+  .exp td.up{color:var(--w-ok);font-weight:600}
+  .exp td.down{color:#e5734f;font-weight:600}
+  ol.refs{font-size:13px;color:var(--w-mut);padding-left:22px;margin:0}
+  .refs li{margin-bottom:7px}
+  .refs .doc{color:var(--w-link);cursor:pointer}
+  .refs q{color:var(--w-dim);font-style:italic}
+  .webnote{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--w-warn);
+    border:1px solid #4d3f22;border-radius:5px;padding:2px 9px;display:inline-block;margin-bottom:10px}
+  .websnips{font-size:13px;color:var(--w-mut)}
+  .websnips .sn{margin-bottom:9px}
+  .websnips .sn a{font-size:13px}
+  .websnips .sn .yr{color:var(--w-dim);font-size:12px} /* год публикации веб-источника */
+  /* инфобокс — sticky внутри скролл-обёртки: top:24px == margin-top:24px, поэтому он
+     визуально неподвижен при скролле (в overflow-контейнере sticky надёжен);
+     при высоком содержимом скроллится внутри себя тонким скроллбаром */
+  .infobox{border:1px solid var(--w-line2);background:var(--w-panel);border-radius:9px;font-size:13px;
+    align-self:start;margin:24px 0;position:sticky;top:24px;
+    max-height:calc(100vh - var(--hdr-h) - 48px);overflow-y:auto;scrollbar-width:thin}
+  @media (max-width:980px){.infobox{margin:var(--col-gap) 0 0;position:static;max-height:none;overflow:visible}}
+  .infobox .ih{background:#1b222a;padding:9px 14px;font-weight:600;border-bottom:1px solid var(--w-line2);
+    border-radius:9px 9px 0 0}
+  .infobox .row{display:flex;justify-content:space-between;gap:10px;padding:7.5px 14px;border-bottom:1px solid var(--w-line)}
+  .infobox .row:last-of-type{border-bottom:0}
+  .infobox .k{color:var(--w-dim)}
+  /* кликабельная строка (например, «Источники»): деликатный ховер — подсвечивается только значение */
+  .infobox .row.lnk{cursor:pointer}
+  .infobox .row.lnk:hover .v{color:var(--w-link)}
+  .infobox .v{font-variant-numeric:tabular-nums;color:var(--w-ink)}
+  .infobox .conf{color:var(--w-ok);font-weight:700}
+  .infobox .sci{color:var(--w-link);font-weight:700}
+  .infobox .v.na{color:var(--w-dim)} /* нераспознанный показатель: «—» приглушённым */
+  .minigraph{padding:12px 14px 10px;border-top:1px solid var(--w-line2)}
+  .minigraph .cap{font-size:11px;color:var(--w-dim);margin-bottom:8px;letter-spacing:.06em;
+    text-transform:uppercase;display:flex;justify-content:space-between}
+  .minigraph .cap button{color:var(--w-link);text-transform:none;letter-spacing:0;font-size:11.5px}
+  .minigraph svg{cursor:pointer;display:block}
+  .skel{background:linear-gradient(90deg,#1a2028,#232b34,#1a2028);background-size:200% 100%;
+    animation:shimmer 1.4s linear infinite;border-radius:5px;height:12px;margin:9px 0}
+  @keyframes shimmer{0%{background-position:120% 0}100%{background-position:-80% 0}}
+  .cursor{display:inline-block;width:8px;height:16px;background:var(--w-link);vertical-align:-3px;
+    border-radius:1px;opacity:.8;animation:blink 1s steps(1) infinite}
+  @keyframes blink{50%{opacity:.15}}
+  @media (prefers-reduced-motion:reduce){
+    .skel{animation:none}
+    .cursor{animation:none}
+    .sysdot.changed{animation:none}
+    *{scroll-behavior:auto !important}
+  }
+
+  /* попап сноски */
+  .fnpop{position:absolute;background:#151b22;border:1px solid #34404d;border-radius:10px;padding:12px 15px;
+    width:min(320px,86vw);font-size:12.5px;box-shadow:0 18px 44px rgba(0,0,0,.6);z-index:40}
+  .fnpop .d{color:var(--w-ink);font-weight:600;margin-bottom:5px;overflow-wrap:anywhere}
+  .fnpop q{color:var(--w-mut);font-style:italic;line-height:1.55;display:block}
+  .fnpop .ft{display:flex;justify-content:space-between;gap:10px;margin-top:9px;color:var(--w-dim);font-size:11.5px}
+  .fnpop .ft button{color:var(--w-link);white-space:nowrap}
+
+  /* граф-оверлей */
+  .goverlay{position:fixed;inset:0;background:rgba(6,8,10,.78);z-index:50;display:flex;
+    align-items:center;justify-content:center;padding:30px}
+  .goverlay .panel{background:var(--w-panel);border:1px solid var(--w-line2);border-radius:12px;
+    width:min(940px,94vw);max-height:90vh;overflow:auto;padding:18px 22px;box-shadow:0 30px 80px rgba(0,0,0,.6)}
+  .goverlay .cap{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px}
+  .goverlay .cap .t{font-family:Georgia,serif;font-size:17px}
+  .goverlay .cap button{color:var(--w-mut);font-size:13px}
+
+  /* ---------- просмотр источников ---------- */
+  /* под шапкой — два столбца, каждый скроллится сам по себе: длинный документ не таскает список */
+  .viewer{display:grid;grid-template-columns:330px minmax(0,1fr);height:calc(100vh - var(--hdr-h))}
+  /* на широких экранах левый край содержимого документа = вертикаль окна поиска шапки:
+     колонка списка = var(--content-x) минус 26px padding-left панели документа */
+  @media (min-width:981px){.viewer{grid-template-columns:calc(var(--content-x) - 26px) minmax(0,1fr)}}
+  /* на узком экране колонки складываются и растут по контенту — скроллит сама страница */
+  @media (max-width:900px){.viewer{grid-template-columns:1fr;height:auto}}
+  .vlist{border-right:1px solid var(--w-line);padding:16px 0;font-size:12.5px;
+    overflow-y:auto;scrollbar-width:thin}
+  .vlist .t{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--w-dim);padding:0 18px 10px}
+  .vsrc{display:flex;gap:10px;padding:9px 18px;color:var(--w-mut);line-height:1.45;width:100%;text-align:left;
+    border-left:2px solid transparent}
+  .vsrc:hover{color:var(--w-ink)}
+  .vsrc.on{background:#182028;border-left-color:var(--w-link);color:var(--w-ink)}
+  .vsrc .n{color:var(--w-link);font-weight:700;font-variant-numeric:tabular-nums;min-width:20px}
+  .vsrc .loc{display:block;font-size:11px;color:var(--w-dim);margin-top:2px}
+  .vsrc .nm{overflow-wrap:anywhere}
+  .vdoc{padding:18px 26px;min-width:0;overflow-y:auto;scrollbar-width:thin}
+  .vdoc .dh{display:flex;align-items:baseline;gap:14px;border-bottom:1px solid var(--w-line2);
+    padding-bottom:10px;margin-bottom:14px;flex-wrap:wrap}
+  .vdoc .dh .name{font-family:Georgia,serif;font-size:16.5px;overflow-wrap:anywhere}
+  .vdoc .dh .kind{font-size:11.5px;color:var(--w-dim)}
+  .vdoc .dh .dl{margin-left:auto;font-size:12px;color:var(--w-link);white-space:nowrap;text-decoration:none}
+  .frag{font-size:13.5px;line-height:1.7;color:#9aa5b1;max-width:70ch;padding:8px 12px;margin-bottom:4px;overflow-wrap:anywhere}
+  .frag .fn{font-size:10.5px;color:var(--w-dim);display:block;margin-bottom:2px}
+  .frag.hit{background:rgba(217,164,65,.09);border:1px solid #4d3f22;border-radius:8px;color:var(--w-body)}
+  .frag.hit .fn{color:var(--w-warn)}
+  .vdoc iframe{width:100%;height:calc(100vh - 170px);border:1px solid var(--w-line2);border-radius:8px;background:#fff}
+  .vempty{color:var(--w-dim);font-size:13.5px;padding:30px 0}
+
+  /* ---------- документы ---------- */
+  .docs{padding:20px 26px 40px;max-width:1100px;margin:0 auto}
+  /* на широких экранах левый край = вертикаль окна поиска шапки, правый отступ = левому */
+  @media (min-width:981px){.docs{max-width:none;margin:0;padding-left:var(--content-x);padding-right:var(--content-x)}}
+  .docs .dt{display:flex;align-items:baseline;gap:14px;margin-bottom:14px;flex-wrap:wrap}
+  .docs .dt h3{font-family:Georgia,serif;font-size:19px;font-weight:400;margin:0}
+  .docs .dt .hint{font-size:12px;color:var(--w-dim)}
+  table.dlist{width:100%;border-collapse:collapse;font-size:13px}
+  .dlist th{text-align:left;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--w-dim);
+    padding:8px 12px;border-bottom:1px solid var(--w-line2);font-weight:600;white-space:nowrap}
+  .dlist td{padding:9px 12px;border-bottom:1px solid var(--w-line);color:var(--w-body);vertical-align:middle}
+  .dlist td.name{color:var(--w-ink);max-width:340px;overflow-wrap:anywhere}
+  .dlist td.name button{color:var(--w-link);text-align:left}
+  .dlist td.num{font-variant-numeric:tabular-nums;color:var(--w-mut)}
+  .badge{display:inline-block;font-size:11px;border-radius:5px;padding:1.5px 8px;white-space:nowrap}
+  .badge.sci{background:rgba(127,168,232,.13);color:var(--w-link)}
+  .badge.rep{background:#20242a;color:var(--w-mut)}
+  .badge.ru{background:rgba(120,194,151,.12);color:var(--w-ok)}
+  .badge.fo{background:rgba(217,164,65,.12);color:var(--w-warn)}
+  .badge.none{color:var(--w-dim)}
+  .dlist tr.hidden-doc td{opacity:.42}
+  .dlist tr.hidden-doc td.act{opacity:1}
+  .ic-btn{display:inline-flex;color:var(--w-dim);margin-left:12px;vertical-align:middle;cursor:pointer}
+  .ic-btn:hover{color:var(--w-link)}
+  .ic-btn.trash:hover{color:#b0655e}
+  .ic-btn.eye-off{color:var(--w-warn)}
+  .dlist td.act{white-space:nowrap;text-align:right}
+
+  /* ---------- оффтоп / ошибка ---------- */
+  /* оффтоп центрируется по вертикали видимой области (высота окна минус шапка) */
+  .oops-center{display:flex;flex-direction:column;justify-content:center;min-height:calc(100vh - var(--hdr-h))}
+  .oops-center .oops{margin-top:0;margin-bottom:0}
+  .oops{max-width:560px;margin:46px auto 54px;text-align:center;padding:0 20px}
+  .oops .glyph{font-family:Georgia,serif;font-size:44px;color:#39424c;margin-bottom:10px}
+  .oops h3{font-family:Georgia,serif;font-size:21px;font-weight:400;margin:0 0 10px}
+  .oops p{color:var(--w-mut);font-size:14px;line-height:1.7;margin:0 0 16px;overflow-wrap:anywhere}
+  .oops .try{display:flex;flex-direction:column;gap:7px;font-size:13.5px}
+  .oops .try button{color:var(--w-link)}
+  .oops .retry{display:inline-block;border:1px solid var(--w-line2);border-radius:8px;padding:7px 18px;
+    color:var(--w-ink);font-size:13.5px;background:#171c21}
+  .oops .retry:hover{border-color:var(--w-link)}
+
+  /* ---------- review ---------- */
+  .review{padding:0 26px 40px;max-width:860px;margin:0 auto}
+  /* на широких экранах — та же вертикаль, что окно поиска шапки; правый отступ = левому */
+  @media (min-width:981px){.review{max-width:none;margin:0;padding-left:var(--content-x);padding-right:var(--content-x)}}
+  /* шапка раздела (заголовок + фильтры + массовые действия) липнет под шапкой сайта */
+  .rhead{position:sticky;top:var(--hdr-h);z-index:6;background:var(--w-bg);
+    border-bottom:1px solid var(--w-line);padding:20px 0 2px;margin-bottom:14px}
+  .review h3{font-family:Georgia,serif;font-size:19px;font-weight:400;margin:0 0 14px}
+  .rtools{display:flex;align-items:center;gap:10px 16px;flex-wrap:wrap;margin:0 0 10px;font-size:12.5px;color:var(--w-mut)}
+  .rtools label{display:flex;align-items:center;gap:6px;white-space:nowrap}
+  .rtools select,.rtools input[type=number]{background:#171c21;border:1px solid var(--w-line2);border-radius:7px;
+    color:var(--w-ink);font-size:12.5px;padding:5px 8px;max-width:280px}
+  .rtools input[type=number]{width:70px}
+  .rbulk{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:0 0 12px;font-size:12.5px;color:var(--w-mut)}
+  .rbulk .selall{display:flex;align-items:center;gap:7px;cursor:pointer;white-space:nowrap}
+  .rbulk .cnt{color:var(--w-ink);font-variant-numeric:tabular-nums}
+  .rbulk .grp{margin-left:auto;display:flex;gap:12px} /* кнопки — к правому краю строки */
+  .rbulk button{border:1px solid var(--w-line2);border-radius:7px;padding:5px 14px;font-size:12.5px;background:#171c21}
+  .rbulk button:disabled{opacity:.45;cursor:default}
+  .rbulk .ok{color:var(--w-ok);border-color:#2c4636}
+  .rbulk .ok:not(:disabled):hover{border-color:var(--w-ok)}
+  .rbulk .no{color:#c98a84;border-color:#4a2f2c}
+  .rbulk .no:not(:disabled):hover{border-color:var(--w-red)}
+  .review input[type=checkbox]{accent-color:var(--w-link);width:15px;height:15px;margin:0;cursor:pointer}
+  .rsummary{border:1px solid var(--w-line2);border-left:3px solid var(--w-link);background:var(--w-panel);
+    border-radius:0 9px 9px 0;padding:10px 14px;font-size:12.5px;color:var(--w-body);margin:0 0 12px}
+  .rsummary ul{margin:7px 0 0;padding-left:18px;color:#c98a84}
+  .rsummary li{margin-bottom:3px;overflow-wrap:anywhere}
+  .rmore{display:block;margin:4px auto 0;border:1px solid var(--w-line2);border-radius:8px;padding:7px 20px;
+    font-size:13px;background:#171c21;color:var(--w-link)}
+  .rmore:hover{border-color:var(--w-link)}
+  .rcard{background:var(--w-panel);border:1px solid var(--w-line2);border-radius:11px;padding:15px 18px;margin-bottom:14px;
+    display:flex;gap:12px;align-items:flex-start}
+  .rcard .rc-chk{margin-top:3px;flex:none}
+  .rcard .rc-body{flex:1;min-width:0}
+  .rcard .rq{font-style:italic;color:var(--w-mut);font-size:13.5px;line-height:1.6;margin-bottom:9px;overflow-wrap:anywhere}
+  .rcard .rx{font-size:13.5px;color:var(--w-body);margin-bottom:5px;overflow-wrap:anywhere}
+  .rcard .rx b{color:var(--w-ink);font-weight:600}
+  .rcard .rmeta{font-size:12px;color:var(--w-dim);margin-bottom:5px;overflow-wrap:anywhere}
+  .rcard .rwarn{font-size:12.5px;color:var(--w-link);margin:5px 0;padding-left:14px;position:relative}
+  .rcard .rwarn::before{content:"⚠";position:absolute;left:0;font-size:11px}
+  .rcard .racts{display:flex;gap:12px;margin-top:10px}
+  .rcard .racts button{border:1px solid var(--w-line2);border-radius:7px;padding:5px 16px;font-size:12.5px;background:#171c21}
+  .rcard .racts .ok{color:var(--w-ok);border-color:#2c4636}
+  .rcard .racts .ok:hover{border-color:var(--w-ok)}
+  .rcard .racts .no{color:#c98a84;border-color:#4a2f2c}
+  .rcard .racts .no:hover{border-color:var(--w-red)}
+  .rempty{color:var(--w-mut);font-size:15px;padding:40px 0;text-align:center}
+</style>
+</head>
+<body>
+
+<header class="hdr" id="hdr">
+  <a class="logo" href="#/">Graph<span>RAG</span> · R&amp;D</a>
+  <div class="hcenter" id="hdr-center">
+    <div class="hsearch" id="hdr-search" hidden>
+      <input id="hdr-q" type="text" placeholder="Искать в Графе…" autocomplete="off">
+    </div>
+  </div>
+  <nav class="hright">
+    <a class="nav-item dimmed" id="nav-answer" href="#/article" title="появится после первого вопроса">Ответ</a>
+    <a class="nav-item" id="nav-docs" href="#/docs">Документы</a>
+    <a class="nav-item" id="nav-review" href="#/review">Review<span class="ndot" id="review-dot" hidden></span></a>
+    <span class="nav-item dimmed" title="скоро">Журнал</span>
+    <div class="upl" id="upl" role="button" tabindex="0" title="Загрузить документы (клик или перетащите файлы)">
+      <span class="ic"><svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.4 15.9A4.6 4.6 0 0 1 6.6 8a6 6 0 0 1 11.7 1.3 4 4 0 0 1 1 7.5"/><path d="M12 20v-7.5"/><path d="m8.7 15.5 3.3-3.3 3.3 3.3"/></svg></span><span><b>Загрузить документы</b></span>
+      <div class="uplpop" id="upl-pop" hidden></div>
+    </div>
+  </nav>
+  <!-- кружок состояния и его поповер — внутри шапки: едут вместе с ней,
+       кружок absolute на её нижней линии -->
+  <button class="sysdot" id="sysdot" title="статус систем" aria-label="статус систем"></button>
+  <div class="syspop" id="syspop" hidden></div>
+</header>
+
+<main id="view"></main>
+
+<div class="fnpop" id="fnpop" hidden></div>
+<input type="file" id="file-input" multiple hidden>
+
+<script>
+'use strict';
+/* ==================================================================
+   GraphRAG «Энциклопедия» — единый SPA-файл (hash-роутинг, без сборки).
+   Все данные из API вставляются ТОЛЬКО через textContent/createElement:
+   цитаты содержат кавычки и угловые скобки.
+   ================================================================== */
+
+// ---------- утилиты ----------
+const $ = s => document.querySelector(s);
+const REDUCED = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+function el(tag, cls, text){
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text != null) n.textContent = text;
+  return n;
+}
+function clear(node){ while (node.firstChild) node.removeChild(node.firstChild); }
+
+// Лупа в правом краю строки поиска: символ без кнопочной обёртки, клик/Enter/Space = поиск
+function searchIcon(run){
+  const ic = el('span', 'sicon');
+  ic.setAttribute('role', 'button');
+  ic.setAttribute('aria-label', 'Искать');
+  ic.tabIndex = 0;
+  ic.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg>';
+  ic.addEventListener('click', run);
+  ic.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' '){ e.preventDefault(); run(); } });
+  return ic;
+}
+function pct(x){ return Math.round((Number(x) || 0) * 100) + ' %'; }
+function trunc(s, n){ s = String(s == null ? '' : s); return s.length > n ? s.slice(0, n - 1) + '…' : s; }
+
+async function apiJSON(path, opts){
+  const res = await fetch(path, opts);
+  if (!res.ok){
+    const err = new Error('HTTP ' + res.status);
+    err.status = res.status;
+    try { err.detail = (await res.json()).detail; } catch (_) {}
+    throw err;
+  }
+  return res.json();
+}
+
+// ---------- кэш документов (имена, научность, тип) ----------
+let docsCache = null;           // массив документов из GET /documents
+let docsById = Object.create(null);
+const docFragCache = new Map(); // document_id -> ответ GET /documents/{id}
+// типы, для которых backend умеет PDF-превью (LibreOffice-конвертация исходника)
+const PREVIEW_TYPES = ['docx', 'docm', 'pptx', 'ppt'];
+const docPreviewCache = new Map(); // document_id -> blob-URL PDF-превью (null — превью нет)
+
+async function loadDocs(force){
+  if (docsCache && !force) return docsCache;
+  try {
+    const list = await apiJSON('/documents');
+    docsCache = Array.isArray(list) ? list : [];
+    docsById = Object.create(null);
+    for (const d of docsCache) docsById[d.id] = d;
+  } catch (_) {
+    docsCache = docsCache || [];
+  }
+  return docsCache;
+}
+function docInfo(id){ return docsById[id] || null; }
+
+// Адрес фрагмента: для PDF page — страница, для PPTX — слайд, иначе сквозной блок
+function fragLoc(documentId, page){
+  const d = docInfo(documentId);
+  const t = (d && d.document_type || '').toLowerCase();
+  const n = (page == null ? '?' : page);
+  if (t === 'pdf') return 'стр. ' + n;
+  if (t === 'pptx' || t === 'ppt') return 'слайд ' + n;
+  return 'блок ' + n;
+}
+function sciLabel(id){
+  const d = docInfo(id);
+  if (!d || d.is_scientific == null) return null;
+  return d.is_scientific ? 'научный источник' : 'отчёт';
+}
+function docName(id){
+  const d = docInfo(id);
+  return d ? d.filename : ('документ ' + trunc(id, 12));
+}
+// Год издания документа (контракт «год статьи»); null, если года нет / документ не в кэше
+function docYear(id){
+  const d = docInfo(id);
+  return d && d.year != null ? d.year : null;
+}
+
+// ---------- недавние вопросы ----------
+const RECENT_KEY = 'graphrag-recent-questions';
+function recentList(){
+  try { const v = JSON.parse(localStorage.getItem(RECENT_KEY) || '[]'); return Array.isArray(v) ? v : []; }
+  catch (_) { return []; }
+}
+function pushRecent(q){
+  const list = [q].concat(recentList().filter(x => x !== q)).slice(0, 5);
+  try { localStorage.setItem(RECENT_KEY, JSON.stringify(list)); } catch (_) {}
+}
+
+// три самых показательных запроса — и на главной, и в подсказках оффтопа
+const POPULAR = [
+  'Обзор способов удаления SO₂ из отходящих газов металлургии',
+  'Какие технические решения циркуляции католита при электроэкстракции никеля описаны в практике?',
+  'Какие методы обессоливания подходят при сульфатах 200–300 мг/л?',
+];
+
+// ==================================================================
+// Состояние приложения
+// ==================================================================
+const S = {
+  article: null,   // состояние текущей «статьи» (см. newArticle)
+  srcView: null,   // состояние экрана источников
+  health: { data: null, failed: false, at: 0, color: 'ok', pinned: false },
+  uploads: [],     // [{name, status, error}]
+};
+
+// ==================================================================
+// Роутер
+// ==================================================================
+function routeName(){
+  const h = location.hash || '#/';
+  if (h.startsWith('#/article')) return 'article';
+  if (h.startsWith('#/sources')) return 'sources';
+  if (h.startsWith('#/docs'))    return 'docs';
+  if (h.startsWith('#/review'))  return 'review';
+  return 'home';
+}
+
+function render(){
+  hideFnpop();
+  closeGraphOverlay();
+  const r = routeName();
+  const view = $('#view');
+  clear(view);
+  // шапка: поиск везде, кроме главной (возврат к статье — кнопкой «назад» браузера)
+  $('#hdr-search').hidden = (r === 'home');
+  $('#hdr-center').hidden = (r === 'home'); // пустую центральную обёртку на главной убираем целиком
+  // «Ответ» виден всегда, но до первого вопроса приглушён и инертен;
+  // после первого вопроса — обычная ссылка на статью
+  // из любого раздела (генерация при уходе не прерывается)
+  const navAns = $('#nav-answer');
+  navAns.classList.toggle('dimmed', !S.article);
+  navAns.title = S.article ? '' : 'появится после первого вопроса';
+  navAns.classList.toggle('cur', !!S.article && r === 'article');
+  $('#nav-docs').classList.toggle('cur', r === 'docs');
+  $('#nav-review').classList.toggle('cur', r === 'review');
+  $('#hdr-q').value = ''; // после запуска поиска поле пустое: вопрос и так виден заголовком статьи
+  if (r === 'home') viewHome(view);
+  else if (r === 'article') viewArticle(view);
+  else if (r === 'sources') viewSources(view);
+  else if (r === 'docs') viewDocs(view);
+  else if (r === 'review') viewReview(view);
+}
+// Уход со страницы статьи НЕ отменяет стрим: он продолжает копить состояние в S.article,
+// и возврат на #/article перерисует накопленное. Отмена — только при новом вопросе (ask()).
+window.addEventListener('hashchange', render);
+// приглушённый «Ответ» инертен: до первого вопроса клик не ведёт на #/article
+$('#nav-answer').addEventListener('click', e => { if (!S.article) e.preventDefault(); });
+
+// ==================================================================
+// Запуск вопроса
+// ==================================================================
+function ask(q){
+  q = String(q || '').trim();
+  if (!q) return;
+  pushRecent(q);
+  abortStream(S.article); // старый стрим не должен дописывать поверх нового вопроса
+  S.article = newArticle(q);
+  startStream(S.article);
+  startWebAnswer(S.article); // веб-контур стартует сразу, параллельно и независимо
+  if (routeName() === 'article') render();
+  else location.hash = '#/article';
+}
+
+// К1: POST /web/answer — независимый веб-поиск; результат складывается в состояние
+// статьи и никого не блокирует. Отменяется тем же AbortController'ом, что и стрим.
+async function startWebAnswer(st){
+  try {
+    const data = await apiJSON('/web/answer', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: st.question }),
+      signal: st.ctrl.signal,
+    });
+    st.web = { phase: 'done', data, error: null };
+  } catch (e) {
+    if (e && e.name === 'AbortError') return; // штатная отмена при новом вопросе
+    st.web = { phase: 'error', data: null, error: e.detail || e.message || 'сеть недоступна' };
+  }
+  // если пользователь уже смотрит веб-режим этой статьи — скелет заменяем ответом
+  if (routeName() === 'article' && S.article === st && st.webMode) paintWebMode(st);
+}
+
+// ==================================================================
+// Главная
+// ==================================================================
+function viewHome(view){
+  const home = el('div', 'home');
+  home.append(el('div', 'sp sp-t')); // гибкий спейсер над заголовком
+  const big = el('div', 'big');
+  big.append('Graph');
+  big.append(el('span', null, 'RAG'));
+  big.append(' — энциклопедия R&D');
+  home.append(big);
+
+  const search = el('div', 'search');
+  const inp = el('input');
+  inp.id = 'home-q';
+  inp.type = 'text';
+  inp.placeholder = 'Искать в Графе…';
+  inp.autocomplete = 'off';
+  const run = () => { const v = inp.value; inp.value = ''; ask(v); };
+  inp.addEventListener('keydown', e => { if (e.key === 'Enter') run(); });
+  search.append(inp, searchIcon(run)); // хоткей ⌘K работает без визуального бейджа
+  home.append(search);
+  home.append(el('div', 'sp sp-m')); // гибкий спейсер между поиском и коробками (вместо margin-top:124px)
+
+  const cols = el('div', 'cols');
+  // «Знаете ли вы?»: место зарезервировано с первого кадра пустым плейсхолдером
+  // (dyk-empty — без рамки), приход /facts/random лишь наполняет его, не двигая коробки
+  const dyk = el('div', 'card dyk dyk-empty');
+  cols.append(dyk);
+
+  const pop = el('div', 'card');
+  pop.append(el('div', 't', 'Популярные статьи'));
+  for (const q of POPULAR){
+    const b = el('button', 'lnk', q + ' →');
+    b.addEventListener('click', () => ask(q));
+    pop.append(b);
+  }
+  cols.append(pop);
+
+  const rec = el('div', 'card');
+  rec.append(el('div', 't', 'Недавнее'));
+  const recent = recentList().slice(0, 3); // не длиннее трёх строк — коробка ниже
+  if (recent.length){
+    for (const q of recent){
+      const b = el('button', 'lnk recent-q', q);
+      b.addEventListener('click', () => ask(q));
+      rec.append(b);
+    }
+  } else {
+    const empty = el('div', null, 'Пока пусто — задайте первый вопрос.');
+    empty.style.cssText = 'color:var(--w-dim);font-size:12.5px';
+    rec.append(empty);
+  }
+  cols.append(rec);
+  home.append(cols);
+
+  const corp = el('div', 'corp', 'Создано в рамках хакатона для Норникель');
+  home.append(corp);
+  home.append(el('div', 'sp sp-b')); // гибкий спейсер под подписью
+  view.append(home);
+
+  inp.focus();
+  loadDocs().then(() => {
+    fillDyk(dyk); // имена документов уже в кэше — можно подписать источник факта
+  });
+}
+
+function plural(n, one, few, many){
+  const m10 = n % 10, m100 = n % 100;
+  if (m10 === 1 && m100 !== 11) return one;
+  if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return few;
+  return many;
+}
+
+// «Знаете ли вы?»: на экран не попадает ни «не указано», ни пустые поля.
+// Факты с дырявыми полями пропускаем и пробуем следующий (по массиву или повторным запросом).
+const DYK_EMPTY = new Set(['', 'не указано', 'неизвестно', 'нет данных', 'unknown', 'unknown property',
+  'unknown material', 'unknown process', 'n/a', 'na', 'none', 'null', '-', '—']);
+function dykField(v){
+  const s = String(v == null ? '' : v).trim();
+  return DYK_EMPTY.has(s.toLowerCase()) ? null : s;
+}
+// Разбор факта в готовые куски фразы; null — факт для карточки не годится
+function dykPhrase(fact){
+  if (!fact) return null;
+  const material = dykField(fact.material);
+  const property = dykField(fact.property);
+  if (!material || !property) return null;
+  const d = String(fact.effect_direction || '').toLowerCase();
+  let dir = null;
+  if (d === 'increase' || d === 'рост') dir = 'рост';
+  else if (d === 'decrease' || d === 'снижение') dir = 'снижение';
+  else if (d === 'neutral' || d === 'без изменений') dir = 'без изменений';
+  if (!dir) return null;
+  let val = '';
+  if (dir !== 'без изменений' && fact.effect_value != null)
+    val = ' на ' + fact.effect_value + (dykField(fact.effect_unit) || '');
+  return { material, property, dir, val, process: dykField(fact.process) };
+}
+
+async function fillDyk(dyk){
+  let fact = null, ph = null;
+  // до 4 попыток: эндпоинт может отдавать один факт или массив — перебираем всё
+  for (let attempt = 0; attempt < 4 && !ph; attempt++){
+    let data = null;
+    try { data = await apiJSON('/facts/random'); }
+    catch (_) { break; } // 404 или эндпоинт ещё не готов — карточку не показываем
+    const pool = Array.isArray(data && data.facts) ? data.facts : [data && data.fact];
+    for (const f of pool){
+      const p = dykPhrase(f);
+      if (p){ fact = f; ph = p; break; }
+    }
+  }
+  if (!ph || !document.body.contains(dyk)) return;
+  dyk.classList.remove('dyk-empty'); // плейсхолдер наполняется — проявляем рамку факта
+  dyk.append(el('div', 't', 'Знаете ли вы?'));
+  // «…что <материал>: «<свойство>» — <рост|снижение>[ на N%][ при «<процесс>»]?»
+  const f = el('div', 'fact');
+  f.append('…что ' + ph.material + ': «' + ph.property + '» — ');
+  f.append(el('b', null, ph.dir + ph.val));
+  if (ph.process) f.append(' при «' + ph.process + '»');
+  f.append('?');
+  dyk.append(f);
+  const src = el('div', 'src');
+  const parts = [];
+  if (fact.source && fact.source.document_id) parts.push(docName(fact.source.document_id));
+  if (fact.confidence != null) parts.push('уверенность ' + Number(fact.confidence).toFixed(2));
+  src.append(parts.join(' · ') + (parts.length ? ' · ' : ''));
+  const more = el('button', 'lnk', 'спросить подробнее →');
+  more.addEventListener('click', () =>
+    ask('что известно про ' + ph.material + (ph.process ? ' при ' + ph.process : '') + '?'));
+  src.append(more);
+  dyk.append(src);
+}
+
+// ==================================================================
+// Статья: состояние + SSE-стрим
+// ==================================================================
+function newArticle(question){
+  return {
+    question,
+    phase: 'streaming',   // streaming | done | offtopic | error | aborted
+    ctrl: new AbortController(), // отмена fetch при новом вопросе
+    evidence: null,       // payload события evidence
+    final: null,          // QueryResponse из события final
+    answerRaw: '',        // сырой текст дельт (с id-шными сносками)
+    error: null,
+    noteMap: new Map(),   // citeId -> note
+    notes: [],            // [{id, ref, quote}] в порядке первого появления
+    // независимый веб-контур (К1): запрос уходит сразу вместе с /ask/stream,
+    // результат ждёт в состоянии, пока пользователь не включит веб-режим глобусом
+    web: { phase: 'loading', data: null, error: null }, // loading | done | error
+    webMode: false,       // что показывает центральная колонка: база или веб-ответ
+  };
+}
+
+// Штатная отмена незавершённого стрима: не ошибка, «final» поверх уже не придёт
+function abortStream(st){
+  if (!st || st.phase !== 'streaming') return;
+  st.phase = 'aborted';
+  st.ctrl.abort();
+}
+
+async function startStream(st){
+  loadDocs(); // имена документов пригодятся сноскам
+  try {
+    const res = await fetch('/ask/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: st.question }),
+      signal: st.ctrl.signal,
+    });
+    if (!res.ok) throw new Error('backend ответил HTTP ' + res.status);
+    const reader = res.body.getReader();
+    const dec = new TextDecoder('utf-8');
+    let buf = '';
+    try {
+      for (;;){
+        const { done, value } = await reader.read();
+        if (done || st.phase === 'aborted') break;
+        buf += dec.decode(value, { stream: true });
+        let i;
+        while ((i = buf.indexOf('\n\n')) !== -1){
+          handleSSE(st, buf.slice(0, i));
+          buf = buf.slice(i + 2);
+        }
+      }
+    } finally {
+      reader.cancel().catch(() => {});
+    }
+    if (st.phase === 'streaming'){ // поток оборвался без final
+      st.phase = 'error';
+      st.error = 'поток оборвался до финального события';
+      syncArticle(st);
+    }
+  } catch (e) {
+    if (st.phase === 'aborted' || (e && e.name === 'AbortError')) return; // штатная отмена
+    if (st.phase === 'streaming' || st.phase === 'error'){
+      st.phase = 'error';
+      st.error = e && e.message ? e.message : 'сеть недоступна';
+      syncArticle(st);
+    }
+  }
+}
+
+function handleSSE(st, block){
+  if (st.phase === 'aborted') return; // после отмены события (включая final) не применяем
+  let ev = 'message', data = '';
+  for (const line of block.split('\n')){
+    if (line.startsWith('event:')) ev = line.slice(6).trim();
+    else if (line.startsWith('data:')) data += line.slice(5).trim();
+  }
+  if (!data) return;
+  let payload;
+  try { payload = JSON.parse(data); } catch (_) { return; }
+  if (ev === 'evidence'){
+    st.evidence = payload;
+    syncArticle(st, 'evidence');
+  } else if (ev === 'delta'){
+    st.answerRaw += (payload.text || '');
+    syncArticle(st, 'delta');
+  } else if (ev === 'final'){
+    st.final = payload;
+    st.phase = payload.offtopic ? 'offtopic' : 'done';
+    syncArticle(st, 'final');
+  }
+}
+
+// Точечная синхронизация DOM, если открыт экран статьи с этим же состоянием
+function syncArticle(st, kind){
+  if (routeName() !== 'article' || S.article !== st) return;
+  if (st.phase === 'offtopic' || st.phase === 'error'){ render(); return; }
+  if (kind === 'evidence'){ paintToc(st); paintInfobox(st); paintMeta(st); }
+  else if (kind === 'delta'){ scheduleAnswerPaint(st); }
+  else if (kind === 'final'){ render(); }
+  else render();
+}
+
+// Коалесинг дельт: полный перерендер ответа не чаще раза за кадр (rAF),
+// иначе на каждой SSE-дельте весь summary прогоняется через сноски и DOM — O(n²)
+let answerPaintRAF = 0;
+function scheduleAnswerPaint(st){
+  if (answerPaintRAF) return;
+  answerPaintRAF = requestAnimationFrame(() => {
+    answerPaintRAF = 0;
+    // к моменту кадра вопрос могли сменить или финализировать — тогда рисовать нечего
+    if (routeName() === 'article' && S.article === st && st.phase === 'streaming'){
+      paintAnswer(st);
+      recalcSpy();    // контент подрос — позиции секций и высота скролла изменились
+      updateTocSpy(); // и активный пункт мог смениться без единого scroll-события
+    }
+  });
+}
+
+// ---------- активные данные ответа ----------
+function respOf(st){ return st.final || st.evidence || {}; }
+// Граф показывается СТРОГО по прямым фактам: только r.graph текущего состояния
+// (final приоритетнее evidence — это даёт respOf). При sufficient=false backend
+// обнуляет graph и переносит факты в related_graph — такой ответ остаётся без графа:
+// никаких фолбэков на related_graph, иначе граф рисуется под косвенные гипотезы.
+function activeGraph(st){
+  const g = respOf(st).graph;
+  return (g && Array.isArray(g.nodes)) ? g : { nodes: [], edges: [] };
+}
+function allSources(st){
+  const r = respOf(st);
+  return [].concat(r.sources || [], r.related_sources || []);
+}
+function uniqueDocsCount(st){
+  const ids = new Set();
+  for (const s of allSources(st)) if (s && s.document_id) ids.add(s.document_id);
+  for (const h of (respOf(st).search_hits || [])) if (h.source && h.source.document_id) ids.add(h.source.document_id);
+  return ids.size;
+}
+
+// ==================================================================
+// Живые сноски: [fragment-…] / [claim-…] / (fragment-…) -> [n]
+// ==================================================================
+const CITE_RE = /[\[(]\s*((?:fragment|claim)-[\w./-]+(?:\s*,\s*(?:fragment|claim)-[\w./-]+)*)\s*[\])]/g;
+
+// Хвост буфера с незакрытой скобкой, которая ещё может стать сноской, придерживается
+function splitPending(buf){
+  const from = Math.max(0, buf.length - 200);
+  for (let i = buf.length - 1; i >= from; i--){
+    const ch = buf[i];
+    if (ch === ']' || ch === ')') break;
+    if (ch === '[' || ch === '('){
+      const inner = buf.slice(i + 1);
+      if (isCiteTail(inner, ch === '[')) return [buf.slice(0, i), buf.slice(i)];
+      break;
+    }
+  }
+  return [buf, ''];
+}
+function isCiteTail(inner, allowEmpty){
+  const s = inner.replace(/^\s+/, '');
+  if (!s) return allowEmpty;
+  if (/^(?:fragment|claim)-[\w.,;:\s/-]*$/i.test(s)) return true;
+  return 'fragment-'.startsWith(s.toLowerCase()) || 'claim-'.startsWith(s.toLowerCase());
+}
+
+// note для id: номер по первому появлению; ссылка резолвится по данным ответа
+function getNote(st, id){
+  if (st.noteMap.has(id)) return st.noteMap.get(id);
+  const note = { id, ref: resolveRef(st, id), quote: null };
+  note.quote = resolveQuote(st, id, note.ref);
+  st.noteMap.set(id, note);
+  st.notes.push(note);
+  return note;
+}
+function noteForSource(st, source){
+  if (!source) return null;
+  const id = source.fragment_id || (source.document_id + '#');
+  if (st.noteMap.has(id)) return st.noteMap.get(id);
+  const note = { id, ref: source, quote: source.quote || null };
+  st.noteMap.set(id, note);
+  st.notes.push(note);
+  return note;
+}
+function resolveRef(st, id){
+  const r = respOf(st);
+  const pools = [].concat(
+    r.sources || [], r.related_sources || [],
+    (r.search_hits || []).map(h => h.source),
+    (r.experiments || []).map(x => x.source),
+    (r.related_experiments || []).map(x => x.source)
+  ).filter(Boolean);
+  if (id.startsWith('fragment-')){
+    const hit = pools.find(s => s.fragment_id === id);
+    if (hit) return hit;
+    // фрагмент не в списках ответа — хотя бы document_id из самого id не выкусить надёжно
+    return null;
+  }
+  // claim-…: пробуем найти узел графа и его фрагмент
+  for (const g of [r.graph, r.related_graph]){
+    const node = g && (g.nodes || []).find(n => n.id === id);
+    if (node && node.data){
+      const fid = node.data.fragment_id || node.data.source_fragment_id;
+      if (fid){
+        const hit = pools.find(s => s.fragment_id === fid);
+        if (hit) return hit;
+      }
+    }
+  }
+  return null;
+}
+function resolveQuote(st, id, ref){
+  if (ref && ref.quote) return ref.quote;
+  const r = respOf(st);
+  const fid = ref ? ref.fragment_id : (id.startsWith('fragment-') ? id : null);
+  if (fid){
+    const hit = (r.search_hits || []).find(h => h.fragment_id === fid);
+    if (hit && hit.text) return trunc(hit.text, 280);
+  }
+  return null;
+}
+
+function supFor(st, note){
+  const n = st.notes.indexOf(note) + 1;
+  const a = el('a', 'ref');
+  a.tabIndex = 0;
+  a.dataset.note = String(n - 1);
+  a.append(el('sup', null, '[' + n + ']'));
+  return a;
+}
+
+// Текст с id-сносками -> DOM с <sup>[n]</sup>; всё содержимое — textContent
+function appendRich(st, container, text){
+  CITE_RE.lastIndex = 0;
+  let last = 0, m;
+  while ((m = CITE_RE.exec(text)) !== null){
+    if (m.index > last) container.append(document.createTextNode(text.slice(last, m.index)));
+    const ids = m[1].split(/\s*,\s*/).filter(x => /^(?:fragment|claim)-/.test(x));
+    for (const id of ids) container.append(supFor(st, getNote(st, id)));
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) container.append(document.createTextNode(text.slice(last)));
+}
+function richParagraphs(st, text, cls){
+  const frag = document.createDocumentFragment();
+  const parts = String(text || '').split(/\n{2,}/).filter(p => p.trim());
+  for (const part of parts.length ? parts : ['']){
+    const p = el('p', cls || 'p');
+    appendRich(st, p, part);
+    frag.append(p);
+  }
+  return frag;
+}
+
+// ==================================================================
+// Экран статьи
+// ==================================================================
+// «Внешних источников» в базовом ответе больше нет: веб живёт в переключателе-глобусе
+const TOC_SECTIONS = [
+  ['ans',   'Ответ'],
+  ['conf',  'Противоречия'],
+  ['gaps',  'Пробелы'],
+  ['hyp',   'Гипотезы'],
+  ['facts', 'Прямые факты и эксперименты'],
+  ['rel',   'Смежные данные'],
+  ['notes', 'Примечания'],
+];
+
+function viewArticle(view){
+  const st = S.article;
+  if (!st){ location.hash = '#/'; return; }
+  if (st.phase === 'offtopic'){ paintOfftopic(view, st); return; }
+  if (st.phase === 'error'){ paintAskError(view, st); return; }
+  // phase 'aborted' сюда не попадает: отмена бывает только при новом вопросе,
+  // и ask() тут же заменяет S.article свежим состоянием
+
+  const cols = el('div', 'cols3');
+  const toc = el('nav', 'toc'); toc.id = 'toc';
+  // скролл-обёртка «текст + инфобокс»: единственный скролл-контейнер экрана статьи
+  const wrap = el('div', 'artwrap'); wrap.id = 'artscroll';
+  const art = el('article'); art.id = 'artbody'; art.style.position = 'relative';
+  const box = el('aside', 'infobox'); box.id = 'infobox';
+  // попап сноски позиционируется по viewport-координатам — при скролле обёртки
+  // он отрывается от своей сноски, поэтому прячем его; заодно обновляем скролл-spy
+  // (слушатель живёт на самой обёртке и удаляется вместе с ней при перерисовке view)
+  wrap.addEventListener('scroll', () => { hideFnpop(); scheduleSpy(); }, { passive: true });
+  wrap.append(art, box);
+  cols.append(toc, wrap);
+  view.append(cols);
+
+  const trow = el('div', 'trow');
+  trow.append(el('h1', 'art', st.question));
+  trow.append(globeBtn(st)); // переключатель веб-ответа — всегда на странице статьи
+  art.append(trow);
+  const meta = el('div', 'meta'); meta.id = 'art-meta';
+  art.append(meta);
+  const ans = el('div'); ans.id = 'sec-ans';
+  const ansBody = el('div'); ansBody.id = 'ans-body';
+  ans.append(ansBody);
+  art.append(ans);
+  const rest = el('div'); rest.id = 'sec-rest';
+  art.append(rest);
+
+  paintToc(st);
+  paintInfobox(st);
+  paintMeta(st);
+  paintAnswer(st);
+  if (st.phase === 'done') paintFinalSections(st);
+  else {
+    const sk = el('div'); sk.id = 'skels';
+    const s1 = el('div', 'skel'); s1.style.width = '88%';
+    const s2 = el('div', 'skel'); s2.style.width = '64%';
+    sk.append(s1, s2);
+    art.append(sk);
+  }
+  // контейнер веб-режима живёт рядом с базовыми секциями и переключается глобусом
+  const web = el('div'); web.id = 'webmode'; web.hidden = true;
+  art.append(web);
+  if (st.webMode) applyWebMode(st); // перерисовка (например, final) сохраняет веб-режим
+}
+
+// ---------- веб-режим: глобус и центральный контент из /web/answer ----------
+function globeBtn(st){
+  const b = el('span', 'gicon' + (st.webMode ? ' on' : ''));
+  b.id = 'gicon';
+  b.setAttribute('role', 'button');
+  b.setAttribute('aria-label', 'Ответ из веб-источников');
+  b.setAttribute('aria-pressed', st.webMode ? 'true' : 'false');
+  b.title = 'Ответ из веб-источников';
+  b.tabIndex = 0;
+  b.innerHTML = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c2.9 2.5 4.6 5.6 4.6 9s-1.7 6.5-4.6 9c-2.9-2.5-4.6-5.6-4.6-9s1.7-6.5 4.6-9z"/></svg>';
+  const run = () => toggleWebMode(st);
+  b.addEventListener('click', run);
+  b.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' '){ e.preventDefault(); run(); } });
+  return b;
+}
+
+function toggleWebMode(st){
+  st.webMode = !st.webMode;
+  applyWebMode(st);
+}
+
+// показывает/прячет центральный контент по st.webMode; TOC приглушается целиком,
+// инфобокс остаётся как есть. Вызывается и из перерисовок (viewArticle).
+function applyWebMode(st){
+  const on = st.webMode;
+  const btn = $('#gicon');
+  if (btn){
+    btn.classList.toggle('on', on);
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+  }
+  for (const id of ['art-meta', 'sec-ans', 'sec-rest', 'skels']){
+    const n = document.getElementById(id);
+    if (n) n.hidden = on;
+  }
+  const toc = $('#toc');
+  if (toc) toc.classList.toggle('webdim', on);
+  const web = $('#webmode');
+  if (web){
+    web.hidden = !on;
+    if (on) paintWebMode(st);
+  }
+  hideFnpop();
+  const sc = document.getElementById('artscroll');
+  if (on && sc) sc.scrollTop = 0; // веб-ответ читается с начала
+  if (!on){ recalcSpy(); scheduleSpy(); } // вернулись к базе — spy снова у руля
+}
+
+function paintWebMode(st){
+  const box = $('#webmode');
+  if (!box) return;
+  clear(box);
+  box.append(el('div', 'webnote', 'не верифицировано, в базу знаний не записано'));
+  const w = st.web || {};
+  if (w.phase === 'loading'){ // ответ ещё в пути — спокойный скелет
+    for (const width of ['88%', '72%', '55%']){
+      const s = el('div', 'skel');
+      s.style.width = width;
+      box.append(s);
+    }
+    return;
+  }
+  if (w.phase === 'error'){
+    box.append(el('div', 'llmerr', 'Веб-ответ не получен: ' + (w.error || 'неизвестная ошибка')));
+    return;
+  }
+  const d = w.data || {};
+  if (d.llm_error) box.append(el('div', 'llmerr', String(d.llm_error)));
+  if (d.answer) box.append(linkifiedParagraphs(d.answer));
+  else if (!d.llm_error) box.append(el('p', 'p', 'Ответ из веб-источников не найден.'));
+  const snips = Array.isArray(d.snippets) ? d.snippets : [];
+  if (snips.length){
+    const sb = el('div', 'websnips');
+    for (const sn of snips.slice(0, 8)) sb.append(snippetEl(sn));
+    box.append(sb);
+  }
+  if (d.url){
+    const p = el('p', 'p');
+    const a = el('a', null, trunc(d.url, 80));
+    a.href = d.url; a.target = '_blank'; a.rel = 'noopener noreferrer';
+    p.append('Основной источник: ', a);
+    box.append(p);
+  }
+}
+
+// текст веб-ответа: http(s)-ссылки кликабельны, всё остальное — textContent
+const URL_RE = /https?:\/\/[^\s<>"'«»()\[\]]+/g;
+function linkifiedParagraphs(text){
+  const frag = document.createDocumentFragment();
+  const parts = String(text || '').split(/\n{2,}/).filter(p => p.trim());
+  for (const part of parts.length ? parts : ['']){
+    const p = el('p', 'p');
+    URL_RE.lastIndex = 0;
+    let last = 0, m;
+    while ((m = URL_RE.exec(part)) !== null){
+      if (m.index > last) p.append(document.createTextNode(part.slice(last, m.index)));
+      const u = m[0].replace(/[.,;:!?]+$/, ''); // хвостовая пунктуация — не часть ссылки
+      const a = el('a', null, trunc(u, 80));
+      a.href = u; a.target = '_blank'; a.rel = 'noopener noreferrer';
+      p.append(a);
+      last = m.index + u.length;
+    }
+    if (last < part.length) p.append(document.createTextNode(part.slice(last)));
+    frag.append(p);
+  }
+  return frag;
+}
+
+// какие секции уже «есть» (для оглавления)
+function sectionCounts(st){
+  const r = respOf(st);
+  const done = st.phase === 'done';
+  const partial = (r.evidence_status === 'partial');
+  return {
+    ans: 1,
+    conf: (r.contradictions || []).length,
+    gaps: done ? (r.gaps || []).length : 0,
+    hyp: done ? (r.hypotheses || []).length : 0,
+    facts: (r.experiments || []).length,
+    rel: partial ? (r.related_experiments || []).length : 0,
+    notes: st.notes.length,
+  };
+}
+
+function paintToc(st){
+  const toc = $('#toc');
+  if (!toc) return;
+  clear(toc);
+  toc.append(el('div', 't', 'Содержание'));
+  const counts = sectionCounts(st);
+  for (const [key, title] of TOC_SECTIONS){
+    const n = counts[key];
+    // полный список секций виден всегда (и после финала): пустые — приглушённые .off без перехода
+    const b = el('button', (n || key === 'ans') ? '' : 'off');
+    b.dataset.key = key;
+    b.append(document.createTextNode(title + ' '));
+    if (n && key !== 'ans') b.append(el('i', null, String(n)));
+    if (n || key === 'ans') b.addEventListener('click', () => tocNavigate(key));
+    toc.append(b);
+  }
+  // перерисовка (evidence/final) сбрасывает и DOM оглавления, и позиции секций:
+  // пересчитываем кэш и возвращаем маркер — либо цель клика, либо по текущему скроллу
+  recalcSpy();
+  if (SPY.navKey !== null){
+    SPY.activeKey = SPY.navKey;
+    applyTocActive();
+  } else {
+    SPY.activeKey = null; // DOM новый — маркер надо проставить безусловно
+    updateTocSpy();
+  }
+}
+
+// ---------- скролл-spy оглавления ----------
+// Активная секция = последний заголовок, чей верх поднялся выше «линии чтения»
+// (верх скролл-области + SPY_LINE px); до первой секции активен «Ответ»; упор в самый
+// низ — последняя секция (иначе короткие секции у дна недостижимы). Позиции секций
+// кэшируются дешёвым offsetTop (offsetParent секций — сама <article>, ей выставлен
+// position:relative) и пересчитываются на resize и после каждой перерисовки,
+// а НЕ на каждый scroll-тик. Подсветка меняется только при реальной смене ключа.
+const SPY_LINE = 100;   // «линия чтения»: отступ от верха скролл-области
+const SPY_ANCHOR = 14;  // зазор цели клика = scroll-margin-top якорей
+const SPY = {
+  keys: [], tops: [],   // кэш секций в координатах скролл-области
+  narrow: false,        // режим на момент пересчёта (узкий = скроллит страница)
+  activeKey: null,      // текущий подсвеченный пункт оглавления
+  navKey: null,         // клик-навигация в процессе: spy не перебивает подсветку
+  navTarget: 0,         // scrollTop, к которому едет плавный скролл
+  navTimer: 0,          // страховочный таймаут снятия флага навигации
+  navDist: 0,           // остаток пути до цели (для продления страховки при прогрессе)
+};
+const SPY_NAV_TIMEOUT = 700; // мс без прогресса к цели — снимаем флаг навигации
+
+function spyIsNarrow(){ return matchMedia('(max-width:980px)').matches; }
+// скролл-контейнер статьи на широком экране — обёртка «текст + инфобокс»
+function artScroller(){ return document.getElementById('artscroll'); }
+
+function recalcSpy(){
+  const art = document.getElementById('artbody');
+  if (!art) return;
+  SPY.narrow = spyIsNarrow();
+  SPY.keys = []; SPY.tops = [];
+  // на узком экране скроллит страница — переводим offsetTop в координаты документа;
+  // на широком — в координаты контента скролл-обёртки (top статьи внутри неё)
+  let base;
+  if (SPY.narrow) base = art.getBoundingClientRect().top + window.scrollY;
+  else {
+    const sc = artScroller();
+    base = sc ? art.getBoundingClientRect().top - sc.getBoundingClientRect().top + sc.scrollTop : 0;
+  }
+  for (const s of art.querySelectorAll('#sec-rest > div[id^="sec-"]')){
+    SPY.keys.push(s.id.slice(4));
+    SPY.tops.push(base + s.offsetTop);
+  }
+}
+
+let spyRAF = 0;
+function scheduleSpy(){
+  if (spyRAF) return;
+  spyRAF = requestAnimationFrame(() => { spyRAF = 0; updateTocSpy(); });
+}
+
+// текущее положение скролл-области: [scrollTop, высота вьюпорта, высота контента, линия чтения]
+function spyScrollPos(art){
+  if (SPY.narrow){
+    const hdrH = ($('#hdr') || {}).offsetHeight || 0; // верх области — под липкой шапкой
+    return [window.scrollY, window.innerHeight, document.documentElement.scrollHeight,
+      window.scrollY + hdrH + SPY_LINE];
+  }
+  const sc = artScroller() || art;
+  return [sc.scrollTop, sc.clientHeight, sc.scrollHeight, sc.scrollTop + SPY_LINE];
+}
+
+function updateTocSpy(){
+  if (routeName() !== 'article') return;
+  if (S.article && S.article.webMode) return; // веб-режим: секции базы скрыты, TOC приглушён
+  const art = document.getElementById('artbody');
+  if (!art || !$('#toc')) return;
+  if (SPY.narrow !== spyIsNarrow()) recalcSpy(); // сменился режим — кэш в других координатах
+  const [pos, viewH, contentH, line] = spyScrollPos(art);
+  if (SPY.navKey !== null){
+    // едем по клику: подсветка уже стоит на цели, spy только ждёт прибытия;
+    // пока плавный скролл реально приближается к цели — продлеваем страховку
+    const dist = Math.abs(pos - SPY.navTarget);
+    if (dist <= 4) endTocNav();
+    else if (dist < SPY.navDist){
+      SPY.navDist = dist;
+      clearTimeout(SPY.navTimer);
+      SPY.navTimer = setTimeout(endTocNav, SPY_NAV_TIMEOUT);
+    }
+    return;
+  }
+  let active = 'ans';
+  if (contentH > viewH && pos + viewH >= contentH - 4 && SPY.keys.length){
+    active = SPY.keys[SPY.keys.length - 1]; // упор в самый низ — последняя секция
+  } else {
+    for (let i = 0; i < SPY.tops.length; i++) if (SPY.tops[i] <= line) active = SPY.keys[i];
+  }
+  setTocActive(active);
+}
+
+function setTocActive(key){
+  if (key === SPY.activeKey) return; // не мигаем: classList трогаем только при смене ключа
+  SPY.activeKey = key;
+  applyTocActive();
+}
+// безусловная простановка маркера (нужна после полной перестройки оглавления)
+function applyTocActive(){
+  const toc = $('#toc');
+  if (!toc) return;
+  for (const b of toc.querySelectorAll('button'))
+    b.classList.toggle('on', b.dataset.key === SPY.activeKey && !b.classList.contains('off'));
+}
+
+// Клик по пункту: подсветка ставится мгновенно и не перебивается spy'ем, пока идёт
+// плавный скролл; флаг снимается по прибытии к цели или страховочным таймаутом ~700мс.
+function tocNavigate(key){
+  const art = document.getElementById('artbody');
+  if (!art) return;
+  if (S.article && S.article.webMode) return; // в веб-режиме содержание некликабельно
+  recalcSpy(); // позиции могли устареть (стрим дорисовывает контент)
+  const [, viewH, contentH] = spyScrollPos(art);
+  const hdrH = SPY.narrow ? (($('#hdr') || {}).offsetHeight || 0) : 0;
+  const i = SPY.keys.indexOf(key);
+  let top;
+  if (i === -1) // «Ответ» (или секция ещё не отрисована) — к началу статьи
+    top = SPY.narrow ? art.getBoundingClientRect().top + window.scrollY - hdrH - SPY_ANCHOR : 0;
+  else
+    top = SPY.tops[i] - hdrH - SPY_ANCHOR;
+  top = Math.max(0, Math.min(Math.round(top), Math.max(0, contentH - viewH)));
+  setTocActive(key);
+  clearTimeout(SPY.navTimer);
+  SPY.navKey = key;
+  SPY.navTarget = top;
+  SPY.navDist = Infinity;
+  SPY.navTimer = setTimeout(endTocNav, SPY_NAV_TIMEOUT);
+  const opts = { top, behavior: REDUCED ? 'auto' : 'smooth' };
+  if (SPY.narrow) window.scrollTo(opts);
+  else (artScroller() || art).scrollTo(opts);
+}
+function endTocNav(){
+  clearTimeout(SPY.navTimer);
+  SPY.navKey = null;
+  // подсветка остаётся на выбранном пункте; следующий реальный скролл вернёт руль spy
+}
+
+// Скролл узкого экрана (page-скролл): один постоянный слушатель на window с guard'ом
+// маршрута внутри updateTocSpy — снимать его не нужно, утечек нет. Слушатель скролла
+// центральной колонки вешается в viewArticle на саму <article> и умирает вместе с ней.
+window.addEventListener('scroll', scheduleSpy, { passive: true });
+// resize меняет и позиции секций, и режим (узкий/широкий) — пересчёт кэша
+window.addEventListener('resize', () => {
+  if (routeName() !== 'article') return;
+  recalcSpy();
+  scheduleSpy();
+});
+
+function paintMeta(st){
+  const meta = $('#art-meta');
+  if (!meta) return;
+  clear(meta);
+  const r = respOf(st);
+  const nDocs = uniqueDocsCount(st);
+  if (nDocs){
+    const b = el('button', 'mlink', 'Собрано по ' + nDocs + ' ' + plural(nDocs, 'документу', 'документам', 'документам') + ' корпуса');
+    b.addEventListener('click', () => openSources(null));
+    meta.append(b);
+    meta.append(' · ');
+  }
+  // ссылка на граф-оверлей активна, только когда графу есть что показать; при пустом
+  // графе (nodes 0 — например, «косвенный» финал обнулил graph) — обычный приглушённый
+  // текст без подчёркивания и клика. Состояние пересчитывается на каждом paintMeta
+  // (evidence и final): к финалу граф может опустеть.
+  const modeText = r.pipeline_mode === 'fast' ? 'быстрый ответ по фрагментам' : 'полный разбор с графом';
+  if (activeGraph(st).nodes.length){
+    const mode = el('button', 'mlink', modeText);
+    mode.addEventListener('click', () => openGraphOverlay(st));
+    meta.append(mode);
+  } else {
+    meta.append(el('span', null, modeText));
+  }
+  meta.append(' · ' + (st.phase === 'done' ? 'обновлено только что' : 'собирается сейчас'));
+}
+
+function paintInfobox(st){
+  const box = $('#infobox');
+  if (!box) return;
+  clear(box);
+  box.append(el('div', 'ih', 'Об этом ответе'));
+  const r = respOf(st);
+  // состав плашки фиксирован с первого мгновения: до события evidence все значения —
+  // приглушённые «—», дальше только подставляем данные, не перестраивая структуру
+  const has = !!(st.evidence || st.final);
+  const addRow = (k, v, vcls) => {
+    const row = el('div', 'row');
+    row.append(el('span', 'k', k), el('span', 'v' + (vcls ? ' ' + vcls : ''), v));
+    box.append(row);
+    return row;
+  };
+  // все строки видимы всегда: нераспознанный показатель (null) — приглушённое «—»,
+  // честный ноль остаётся нулём (0 %, 0, 0 / 0).
+  // Инфобокс показывает ПОЛНУЮ правдивую информацию без фильтров и живёт уже во время
+  // генерации: значения заполняются с события evidence. Финал может лишь УВЕЛИЧИТЬ
+  // «Источники»/«Научность» (добавляет процитированное сверх топ-12, чтобы сноски
+  // резолвились) — рост, а не усыхание, поэтому активное заполнение оставляем.
+  const confKnown = has && r.confidence != null;
+  addRow('Уверенность', confKnown ? pct(r.confidence) : '—', confKnown ? 'conf' : 'na');
+  const sciKnown = has && r.scientific_share != null;
+  addRow('Научность', sciKnown ? pct(r.scientific_share) : '—', sciKnown ? 'sci' : 'na');
+  const srcCount = allSources(st).length || (r.search_hits || []).length;
+  // «Источники» кликабельны, только когда источников > 0: ведут на тот же #/sources,
+  // что и мета-ссылка «Собрано по N документам корпуса»; при 0 — инертная строка
+  const srcRow = addRow('Источники', has ? String(srcCount) : '—', has ? null : 'na');
+  if (has && srcCount > 0){
+    srcRow.classList.add('lnk');
+    srcRow.setAttribute('role', 'link');
+    srcRow.tabIndex = 0;
+    const openSrc = () => openSources(null);
+    srcRow.addEventListener('click', openSrc);
+    srcRow.addEventListener('keydown', e => { if (e.key === 'Enter') openSrc(); });
+  }
+  const g = activeGraph(st);
+  addRow('Узлы / связи',
+    has ? ((g.nodes || []).length + ' / ' + (g.edges || []).length) : '—',
+    has ? null : 'na');
+
+  // зона мини-графа присутствует всегда; до данных — спокойный «—» без анимаций
+  const mg = el('div', 'minigraph');
+  const cap = el('div', 'cap');
+  cap.append(el('span', null, 'Граф'));
+  if ((g.nodes || []).length){
+    const expand = el('button', null, 'развернуть →');
+    expand.addEventListener('click', () => openGraphOverlay(st));
+    cap.append(expand);
+  }
+  mg.append(cap);
+  if ((g.nodes || []).length){
+    const svg = graphSVG(g, 10, 220, true);
+    svg.addEventListener('click', () => openGraphOverlay(st));
+    mg.append(svg);
+  } else {
+    const ph = el('div', null, '—');
+    ph.style.cssText = 'height:72px;display:flex;align-items:center;justify-content:center;color:var(--w-dim)';
+    mg.append(ph);
+  }
+  box.append(mg);
+}
+
+function paintAnswer(st){
+  const body = $('#ans-body');
+  if (!body) return;
+  clear(body);
+  if (st.phase === 'done'){
+    const r = st.final || {};
+    if (r.llm_error) body.append(el('div', 'llmerr', 'Генерация деградировала: ' + r.llm_error));
+    body.append(richParagraphs(st, r.summary || ''));
+    return;
+  }
+  const [shown] = splitPending(st.answerRaw);
+  const frag = richParagraphs(st, shown);
+  const lastP = frag.lastChild;
+  body.append(frag);
+  (lastP || body).append(el('span', 'cursor'));
+}
+
+function paintFinalSections(st){
+  const r = st.final || {};
+  // сноски строим заново с чистой нумерацией: финальный summary — источник истины
+  st.noteMap = new Map();
+  st.notes = [];
+  paintAnswer(st);
+
+  const rest = $('#sec-rest');
+  if (!rest) return;
+  clear(rest);
+  const sec = (key, title) => {
+    const w = el('div'); w.id = 'sec-' + key;
+    w.append(el('div', 'sec-h', title));
+    rest.append(w);
+    return w;
+  };
+
+  if ((r.contradictions || []).length){
+    const w = sec('conf', 'Противоречия');
+    for (const c of r.contradictions){
+      const d = el('div', 'conflict');
+      d.append(document.createTextNode('⚑ '));
+      appendRich(st, d, String(c));
+      w.append(d);
+    }
+  }
+  if ((r.gaps || []).length){
+    const w = sec('gaps', 'Пробелы');
+    for (const gp of r.gaps){
+      const d = el('div', 'gap');
+      appendRich(st, d, String(gp));
+      w.append(d);
+    }
+  }
+  if ((r.hypotheses || []).length){
+    const w = sec('hyp', 'Гипотезы');
+    for (const h of r.hypotheses){
+      const p = el('p', 'hyp');
+      p.append(el('span', 'mark', 'Косвенно'));
+      appendRich(st, p, String(h));
+      w.append(p);
+    }
+  }
+  if ((r.experiments || []).length){
+    const w = sec('facts', 'Прямые факты и эксперименты');
+    w.append(expTable(st, r.experiments));
+  }
+  if (r.evidence_status === 'partial' && (r.related_experiments || []).length){
+    const w = sec('rel', 'Смежные данные');
+    w.append(expTable(st, r.related_experiments));
+  }
+  // секции «Внешние источники» в базовом ответе больше нет: веб-ответ живёт
+  // в переключателе-глобусе (final.web_answer из контракта убран)
+  if (st.notes.length){
+    const w = sec('notes', 'Примечания');
+    const ol = el('ol', 'refs');
+    for (const note of st.notes) ol.append(noteLi(st, note));
+    w.append(ol);
+  }
+  paintToc(st);
+  paintInfobox(st);
+  paintMeta(st);
+}
+
+function snippetEl(sn){
+  const d = el('div', 'sn');
+  if (typeof sn === 'string'){ d.textContent = sn; return d; }
+  const url = sn.url || sn.href || sn.link || null;
+  const title = sn.title || url || 'источник';
+  const body = sn.snippet || sn.body || sn.text || '';
+  if (url){
+    const a = el('a', null, trunc(title, 90));
+    a.href = url; a.target = '_blank'; a.rel = 'noopener noreferrer';
+    d.append(a);
+  } else d.append(el('b', null, trunc(title, 90)));
+  // год публикации из научных API (контракт «год статьи»): year или date рядом с заголовком
+  const yr = sn.year != null ? sn.year : sn.date;
+  if (yr != null && String(yr) !== '') d.append(el('span', 'yr', ' · ' + yr));
+  if (body){ d.append(document.createElement('br')); d.append(document.createTextNode(trunc(body, 220))); }
+  return d;
+}
+
+function noteLi(st, note){
+  const li = el('li');
+  if (note.ref && note.ref.document_id){
+    const doc = el('span', 'doc', docName(note.ref.document_id));
+    doc.tabIndex = 0;
+    doc.setAttribute('role', 'link');
+    const open = () => openSources(note.id);
+    doc.addEventListener('click', open);
+    doc.addEventListener('keydown', e => { if (e.key === 'Enter') open(); });
+    li.append(doc);
+    const yr = docYear(note.ref.document_id); // год издания рядом с именем файла (контракт «год статьи»)
+    if (yr != null) li.append(' (' + yr + ')');
+    li.append(', ' + fragLoc(note.ref.document_id, note.ref.page));
+    const sci = sciLabel(note.ref.document_id);
+    if (sci) li.append(' · ' + sci);
+  } else if (/^https?:\/\//i.test(note.id || '')){
+    // страховка: цитата не резолвится, но это URL — рендерим кликабельную ссылку
+    const a = el('a', null, trunc(note.id, 90));
+    a.href = note.id; a.target = '_blank'; a.rel = 'noopener noreferrer';
+    li.append(a);
+  } else {
+    li.append('фрагмент вне списка источников ответа');
+  }
+  if (note.quote){
+    li.append(' — ');
+    li.append(el('q', null, '«' + trunc(note.quote, 220) + '»'));
+  }
+  return li;
+}
+
+function expTable(st, rows){
+  const wrap = el('div', 'tblwrap');
+  const t = el('table', 'exp');
+  const head = el('tr');
+  for (const h of ['Материал', 'Процесс', 'T, °C', 'Свойство', 'Эффект', 'Лаб.', 'Ист.']) head.append(el('th', null, h));
+  t.append(head);
+  for (const row of rows){
+    const tr = el('tr');
+    tr.append(el('td', null, row.material || '—'));
+    tr.append(el('td', null, row.process || '—'));
+    tr.append(el('td', null, row.temperature_c != null ? String(row.temperature_c) : '—'));
+    tr.append(el('td', null, row.property || '—'));
+    const eff = String(row.effect || '—');
+    const low = eff.toLowerCase();
+    const up = low.startsWith('рост') || low.startsWith('increase') || low.startsWith('увелич');
+    const down = low.startsWith('сниж') || low.startsWith('decrease') || low.startsWith('умень') || low.startsWith('паден');
+    const td = el('td', up ? 'up' : (down ? 'down' : null));
+    td.textContent = (up ? '▲ ' : down ? '▼ ' : '') + eff;
+    tr.append(td);
+    tr.append(el('td', null, row.lab && row.lab !== 'Unknown Lab' ? row.lab : '—'));
+    const tdRef = el('td');
+    const note = noteForSource(st, row.source);
+    if (note) tdRef.append(supFor(st, note));
+    tr.append(tdRef);
+    t.append(tr);
+  }
+  wrap.append(t);
+  return wrap;
+}
+
+// ---------- оффтоп и ошибка — один жанр ----------
+function paintOfftopic(view, st){
+  const o = el('div', 'oops');
+  o.append(el('div', 'glyph', '∅'));
+  o.append(el('h3', null, 'Такой статьи в энциклопедии нет'));
+  o.append(el('p', null,
+    'Вопрос не похож на запрос к базе знаний R&D, поэтому полный поиск не запускался. ' +
+    'Здесь отвечают про материалы, процессы, параметры, эксперименты и источники.'));
+  const tries = el('div', 'try');
+  for (const q of POPULAR.slice(0, 3)){
+    const b = el('button', null, q + ' →');
+    b.addEventListener('click', () => ask(q));
+    tries.append(b);
+  }
+  o.append(tries);
+  const center = el('div', 'oops-center'); // вертикальное центрирование в видимой области
+  center.append(o);
+  view.append(center);
+}
+
+function paintAskError(view, st){
+  const o = el('div', 'oops');
+  o.append(el('div', 'glyph', '⚠'));
+  o.append(el('h3', null, 'Ответ не собрался'));
+  o.append(el('p', null, 'Причина: ' + (st.error || 'неизвестная ошибка') + '. База знаний на месте — можно попробовать ещё раз.'));
+  const retry = el('button', 'retry', 'Повторить запрос');
+  retry.addEventListener('click', () => ask(st.question));
+  o.append(retry);
+  view.append(o);
+}
+
+// ==================================================================
+// Попап сноски
+// ==================================================================
+let fnpopHideTimer = null;
+
+function showFnpop(refEl){
+  const st = S.article;
+  if (!st) return;
+  const note = st.notes[Number(refEl.dataset.note)];
+  if (!note) return;
+  const pop = $('#fnpop');
+  clear(pop);
+  if (note.ref && note.ref.document_id){
+    pop.append(el('div', 'd', docName(note.ref.document_id)));
+    if (note.quote) pop.append(el('q', null, '«' + trunc(note.quote, 300) + '»'));
+    const ft = el('div', 'ft');
+    const locBits = [fragLoc(note.ref.document_id, note.ref.page)];
+    const sci = sciLabel(note.ref.document_id);
+    if (sci) locBits.push(sci);
+    ft.append(el('span', null, locBits.join(' · ')));
+    const open = el('button', null, 'открыть источник →');
+    open.addEventListener('click', () => { hideFnpop(); openSources(note.id); });
+    ft.append(open);
+    pop.append(ft);
+  } else {
+    pop.append(el('div', 'd', 'Источник не найден в списке ответа'));
+    if (note.quote) pop.append(el('q', null, '«' + trunc(note.quote, 300) + '»'));
+  }
+  pop.hidden = false;
+  // позиционирование у сноски, не давая уехать за края
+  const r = refEl.getBoundingClientRect();
+  const pw = pop.offsetWidth, ph = pop.offsetHeight;
+  let left = r.left + window.scrollX - 20;
+  left = Math.max(8 + window.scrollX, Math.min(left, window.scrollX + document.documentElement.clientWidth - pw - 8));
+  let top = r.bottom + window.scrollY + 8;
+  if (r.bottom + ph + 16 > window.innerHeight) top = r.top + window.scrollY - ph - 8;
+  pop.style.left = left + 'px';
+  pop.style.top = Math.max(window.scrollY + 8, top) + 'px';
+}
+function hideFnpop(){ const p = $('#fnpop'); if (p) p.hidden = true; }
+function scheduleHideFnpop(){
+  clearTimeout(fnpopHideTimer);
+  fnpopHideTimer = setTimeout(hideFnpop, 250);
+}
+document.addEventListener('mouseover', e => {
+  const ref = e.target.closest && e.target.closest('.ref[data-note]');
+  if (ref){ clearTimeout(fnpopHideTimer); showFnpop(ref); }
+  else if (e.target.closest && e.target.closest('#fnpop')) clearTimeout(fnpopHideTimer);
+});
+document.addEventListener('mouseout', e => {
+  if ((e.target.closest && (e.target.closest('.ref[data-note]') || e.target.closest('#fnpop'))))
+    scheduleHideFnpop();
+});
+document.addEventListener('click', e => {
+  const ref = e.target.closest && e.target.closest('.ref[data-note]');
+  if (ref){ e.preventDefault(); clearTimeout(fnpopHideTimer); showFnpop(ref); return; }
+  if (!(e.target.closest && e.target.closest('#fnpop'))) hideFnpop();
+});
+document.addEventListener('focusin', e => {
+  const ref = e.target.closest && e.target.closest('.ref[data-note]');
+  if (ref) showFnpop(ref);
+});
+
+// ==================================================================
+// Граф по контракту КГ: продольная раскладка слева-направо
+// [Material/Process/Equipment/Condition] → [Claim] → [Document]
+// ==================================================================
+function nodeColor(type){
+  const t = String(type || '').toLowerCase();
+  if (t.includes('material'))  return 'var(--w-link)';       // голубой — исходные материалы
+  if (t.includes('process') || t.includes('equipment') || t.includes('condition'))
+    return '#4a648c';                                        // тёмно-синий приглушённый — процесс/оборудование/условие
+  if (t.includes('claim'))     return '#5b6672';             // серый — утверждение
+  if (t.includes('document'))  return '#20272f';             // тёмный — документ-источник
+  return '#5b6672';                                          // неизвестный тип трактуем как Claim (серый)
+}
+// колонка по типу узла (контракт КГ):
+//   0 — вход: Material/Process/Equipment/Condition
+//   2 — Document (правый край)
+//   1 — Claim и любой неизвестный тип (в т.ч. старые Property/Effect payload'ы)
+const GRAPH_COL_LEFT  = ['material', 'process', 'equipment', 'condition'];
+function graphColumn(type){
+  const t = String(type || '').toLowerCase();
+  if (GRAPH_COL_LEFT.some(k => t.includes(k))) return 0;
+  if (t.includes('document')) return 2;
+  return 1; // Claim и неизвестные типы — в центральную колонку, рендер не падает
+}
+// mini=true — компакт для инфобокса (подпись под узлом, масштаб под ширину колонки);
+// mini=false — оверлей (подпись справа, пиксельный размер: высокий граф скроллится в панели)
+function graphSVG(graph, maxN, w, mini){
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('role', 'img');
+  svg.setAttribute('aria-label', 'граф окрестности ответа');
+  const nodes = (graph.nodes || []).slice(0, maxN);
+  if (!nodes.length){ svg.setAttribute('viewBox', '0 0 ' + w + ' 40'); return svg; }
+
+  // раскладка по колонкам типа; пустые колонки схлопываются
+  const byCol = [[], [], []];
+  for (const n of nodes) byCol[graphColumn(n.type)].push(n);
+  const cols = byCol.filter(c => c.length);
+
+  const rowH = mini ? 30 : 46;
+  const padY = mini ? 14 : 28;
+  const maxRows = Math.max.apply(null, cols.map(c => c.length));
+  const h = padY * 2 + maxRows * rowH;
+  svg.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
+  if (mini) svg.setAttribute('width', '100%');
+  else { svg.setAttribute('width', String(w)); svg.setAttribute('height', String(h)); }
+
+  const padX = mini ? 8 : 30;
+  const band = (w - padX * 2) / cols.length;
+  const pos = new Map(); // node.id -> [x, y]
+  cols.forEach((col, ci) => {
+    // в мини узел по центру полосы (подпись под ним), в оверлее — у левого края (подпись справа)
+    const x = padX + band * ci + (mini ? band / 2 : 14);
+    col.forEach((n, ri) => {
+      pos.set(n.id, [x, h / 2 + (ri - (col.length - 1) / 2) * rowH]);
+    });
+  });
+
+  const r = mini ? 4 : 6;
+  for (const e of (graph.edges || [])){
+    if (!pos.has(e.source) || !pos.has(e.target)) continue;
+    let [x1, y1] = pos.get(e.source), [x2, y2] = pos.get(e.target);
+    if (x2 < x1){ const t = [x1, y1]; [x1, y1] = [x2, y2]; [x2, y2] = t; } // рисуем всегда слева-направо
+    const p = document.createElementNS(ns, 'path');
+    const dx = Math.max((x2 - x1) / 2, mini ? 10 : 26); // внутри одной колонки — небольшая дуга
+    p.setAttribute('d', 'M' + x1.toFixed(1) + ' ' + y1.toFixed(1)
+      + ' C' + (x1 + dx).toFixed(1) + ' ' + y1.toFixed(1)
+      + ' ' + (x2 - dx).toFixed(1) + ' ' + y2.toFixed(1)
+      + ' ' + x2.toFixed(1) + ' ' + y2.toFixed(1));
+    p.setAttribute('fill', 'none');
+    p.style.stroke = 'var(--w-line2)';
+    // ховер-подсветка (только в оверлее): по data-source/target находим инцидентные рёбра
+    p.setAttribute('data-source', e.source);
+    p.setAttribute('data-target', e.target);
+    svg.append(p);
+  }
+
+  for (const col of cols){
+    for (const n of col){
+      const [x, y] = pos.get(n.id);
+      const g = document.createElementNS(ns, 'g');
+      g.setAttribute('data-id', n.id); // ключ для ховер-подсветки инцидентных рёбер и соседей
+      const title = document.createElementNS(ns, 'title');
+      title.textContent = (n.label || n.id) + (n.type ? ' · ' + n.type : '');
+      g.append(title);
+      const c = document.createElementNS(ns, 'circle');
+      c.setAttribute('cx', x.toFixed(1)); c.setAttribute('cy', y.toFixed(1));
+      c.setAttribute('r', String(String(n.type || '').toLowerCase().includes('material') ? r + 1 : r));
+      c.style.fill = nodeColor(n.type);
+      if (!mini) c.setAttribute('stroke-width', '2'); // видимая обводка при ховер-подсветке
+      g.append(c);
+      const t = document.createElementNS(ns, 'text');
+      if (mini){
+        t.setAttribute('x', x.toFixed(1));
+        t.setAttribute('y', (y + r + 8.5).toFixed(1));
+        t.setAttribute('text-anchor', 'middle');
+        t.setAttribute('font-size', '6.5');
+        t.textContent = trunc(n.label || n.id, 12);
+      } else {
+        t.setAttribute('x', (x + r + 7).toFixed(1));
+        t.setAttribute('y', (y + 3.5).toFixed(1));
+        t.setAttribute('font-size', '11');
+        // в оверлее полоса колонки ~290px — подписи длиннее, чтобы не резать «Конвертерный шл…»
+        t.textContent = trunc(n.label || n.id, 34);
+      }
+      t.style.fill = 'var(--w-dim)';
+      g.append(t);
+      svg.append(g);
+    }
+  }
+  if (!mini) attachGraphHover(svg, graph.edges || []);
+  return svg;
+}
+
+// Ховер/клик в развёрнутом графе. При наведении на вершину голубым (var(--w-link))
+// подсвечивается её ПУТЬ по НАПРАВЛЕННЫМ рёбрам: объединение всех потомков (BFS вперёд
+// по source→target) и всех предков (BFS назад по target→source) плюс ТОЛЬКО рёбра,
+// пройденные этими обходами. Именно поэтому через общий узел (например, Document двух
+// материалов) подсветка не «перетекает» на чужие пути: у Material загораются его Claims
+// и их Documents, у Claim — входы слева и документ справа, у Document — все его Claims
+// со входами. Остальной граф НЕ затемняется. Клик по вершине фиксирует (пинит) подсветку
+// её пути: она остаётся после увода курсора; ховер по другим вершинам поверх пина
+// показывает временную подсветку, но при уходе возвращает пин. Клик по фону оверлея
+// (или повторный клик по запиненной вершине) снимает фиксацию; клик по другой вершине —
+// переключает пин.
+function attachGraphHover(svg, edges){
+  const fwd = new Map(); // node.id -> Set целей его исходящих рёбер (source→target)
+  const bwd = new Map(); // node.id -> Set источников его входящих рёбер (target→source)
+  for (const e of edges){
+    if (!fwd.has(e.source)) fwd.set(e.source, new Set());
+    if (!bwd.has(e.target)) bwd.set(e.target, new Set());
+    fwd.get(e.source).add(e.target);
+    bwd.get(e.target).add(e.source);
+  }
+  const nodeEls = Array.from(svg.querySelectorAll('g[data-id]'));
+  const edgeEls = Array.from(svg.querySelectorAll('path[data-source]'));
+
+  const edgeKey = (source, target) => source + '→' + target;
+
+  // Направленный BFS из id по карте adj: достижимые вершины + пройденные рёбра.
+  // forward=true — обход вперёд (соседи — цели рёбер), false — назад (соседи —
+  // источники); ключ ребра всегда в исходной ориентации source→target.
+  const walk = (id, adj, forward, nodes, edgeKeys) => {
+    const seen = new Set([id]);
+    const queue = [id];
+    while (queue.length){
+      const cur = queue.shift();
+      for (const nb of (adj.get(cur) || new Set())){
+        edgeKeys.add(forward ? edgeKey(cur, nb) : edgeKey(nb, cur));
+        if (!seen.has(nb)){ seen.add(nb); queue.push(nb); }
+      }
+    }
+    for (const n of seen) nodes.add(n);
+  };
+
+  // путь вершины id: {nodes: Set вершин, edges: Set ключей рёбер} — потомки и предки
+  const path = id => {
+    const nodes = new Set(), edgeKeys = new Set();
+    walk(id, fwd, true, nodes, edgeKeys);
+    walk(id, bwd, false, nodes, edgeKeys);
+    return { nodes, edges: edgeKeys };
+  };
+
+  // Красим путь голубым БЕЗ затемнения остального. set === null снимает всю подсветку.
+  const paint = set => {
+    for (const p of edgeEls){
+      const inc = set && set.edges.has(edgeKey(p.getAttribute('data-source'), p.getAttribute('data-target')));
+      p.style.stroke = inc ? 'var(--w-link)' : 'var(--w-line2)';
+    }
+    for (const g of nodeEls){
+      const c = g.querySelector('circle');
+      if (c) c.style.stroke = (set && set.nodes.has(g.getAttribute('data-id'))) ? 'var(--w-link)' : 'none';
+    }
+  };
+
+  let pinnedNodeId = null; // зафиксированная вершина (её путь подсвечен постоянно)
+
+  const showPinned = () => paint(pinnedNodeId ? path(pinnedNodeId) : null);
+
+  for (const g of nodeEls){
+    const id = g.getAttribute('data-id');
+    g.style.cursor = 'pointer';
+    // временная подсветка пути под курсором (поверх пина)
+    g.addEventListener('mouseenter', () => paint(path(id)));
+    // при уходе — вернуться к зафиксированному состоянию (или снять, если пина нет)
+    g.addEventListener('mouseleave', showPinned);
+    // клик по вершине: тот же узел — снять пин, другой — зафиксировать его путь
+    g.addEventListener('click', ev => {
+      ev.stopPropagation(); // клик по фону оверлея не должен дополнительно снимать пин
+      pinnedNodeId = (pinnedNodeId === id) ? null : id;
+      paint(path(id));
+    });
+  }
+
+  // клик по фону svg (не по вершине) — снять фиксацию
+  svg.addEventListener('click', () => { pinnedNodeId = null; paint(null); });
+}
+
+function openGraphOverlay(st){
+  closeGraphOverlay();
+  const g = activeGraph(st);
+  const ov = el('div', 'goverlay');
+  ov.id = 'goverlay';
+  const panel = el('div', 'panel');
+  const cap = el('div', 'cap');
+  cap.append(el('span', 't', 'Окрестность графа · ' + (g.nodes || []).length + ' узлов, ' + (g.edges || []).length + ' связей'));
+  const close = el('button', null, 'закрыть ✕');
+  close.addEventListener('click', closeGraphOverlay);
+  cap.append(close);
+  panel.append(cap);
+  if ((g.nodes || []).length) panel.append(graphSVG(g, 60, 880, false));
+  else panel.append(el('p', 'p', 'Граф этого ответа пуст.'));
+  ov.append(panel);
+  ov.addEventListener('click', e => { if (e.target === ov) closeGraphOverlay(); });
+  document.body.append(ov);
+  close.focus();
+}
+function closeGraphOverlay(){
+  const ov = $('#goverlay');
+  if (ov) ov.remove();
+}
+
+// ==================================================================
+// Экран источников
+// ==================================================================
+function buildSrcEntries(){
+  const st = S.article;
+  if (!st) return [];
+  const entries = [];
+  const seen = new Set();
+  st.notes.forEach((note, i) => {
+    if (!note.ref || !note.ref.document_id) return;
+    const key = note.ref.document_id + '|' + (note.ref.fragment_id || '');
+    if (seen.has(key)) return;
+    seen.add(key);
+    entries.push({ n: i + 1, ref: note.ref });
+  });
+  const r = respOf(st);
+  for (const pool of [r.sources || [], r.related_sources || [], (r.search_hits || []).map(h => h.source)]){
+    for (const s of pool){
+      if (!s || !s.document_id) continue;
+      const key = s.document_id + '|' + (s.fragment_id || '');
+      if (seen.has(key)) continue;
+      seen.add(key);
+      entries.push({ n: null, ref: s });
+    }
+  }
+  return entries;
+}
+
+// открыть источники текущего ответа; citeId — выделить конкретную сноску
+function openSources(citeId){
+  const entries = buildSrcEntries();
+  let sel = 0;
+  if (citeId && S.article){
+    const note = S.article.noteMap.get(citeId);
+    if (note && note.ref){
+      const i = entries.findIndex(e => e.ref === note.ref ||
+        (e.ref.document_id === note.ref.document_id && e.ref.fragment_id === note.ref.fragment_id));
+      if (i >= 0) sel = i;
+    }
+  }
+  S.srcView = { entries, sel, docMode: false };
+  if (routeName() === 'sources') render();
+  else location.hash = '#/sources';
+}
+// открыть один документ (из базы знаний), без подсветки
+function openDocView(docId, highlightFragment){
+  S.srcView = {
+    entries: [{ n: null, ref: { document_id: docId, fragment_id: highlightFragment || null } }],
+    sel: 0, docMode: true,
+  };
+  if (routeName() === 'sources') render();
+  else location.hash = '#/sources';
+}
+
+function viewSources(view){
+  const sv = S.srcView;
+  if (!sv || !sv.entries.length){ location.hash = '#/'; return; }
+  const grid = el('div', 'viewer');
+  const list = el('div', 'vlist');
+  list.append(el('div', 't', sv.docMode ? 'Просмотр документа' : ('Источники · ' + sv.entries.length)));
+  sv.entries.forEach((entry, i) => {
+    const b = el('button', 'vsrc' + (i === sv.sel ? ' on' : ''));
+    b.append(el('span', 'n', entry.n != null ? String(entry.n) : '·'));
+    const body = el('div');
+    body.append(el('span', 'nm', docName(entry.ref.document_id)));
+    const bits = [];
+    const yr = docYear(entry.ref.document_id); // год издания рядом с именем файла (контракт «год статьи»)
+    if (yr != null) bits.push(String(yr));
+    if (entry.ref.fragment_id) bits.push(fragLoc(entry.ref.document_id, entry.ref.page));
+    const sci = sciLabel(entry.ref.document_id);
+    if (sci) bits.push(sci);
+    if (bits.length) body.append(el('span', 'loc', bits.join(' · ')));
+    b.append(body);
+    b.addEventListener('click', () => { sv.sel = i; render(); });
+    list.append(b);
+  });
+  const doc = el('div', 'vdoc');
+  doc.id = 'vdoc';
+  grid.append(list, doc);
+  view.append(grid);
+  paintSourceDoc(sv.entries[sv.sel].ref);
+}
+
+async function paintSourceDoc(ref){
+  const box = $('#vdoc');
+  if (!box) return;
+  clear(box);
+  await loadDocs();
+  const info = docInfo(ref.document_id);
+  const head = el('div', 'dh');
+  head.append(el('span', 'name', info ? info.filename : docName(ref.document_id)));
+  const kindBits = [];
+  const sci = sciLabel(ref.document_id);
+  if (sci) kindBits.push(sci);
+  if (info && info.element_count) kindBits.push(info.element_count + ' фрагм.');
+  if (kindBits.length) head.append(el('span', 'kind', kindBits.join(' · ')));
+  const dl = el('a', 'dl', '⇩ Скачать оригинал');
+  dl.href = '/documents/' + encodeURIComponent(ref.document_id) + '/original';
+  dl.setAttribute('download', '');
+  head.append(dl);
+  box.append(head);
+
+  const docType = info ? String(info.document_type || '').toLowerCase() : '';
+  if (docType === 'pdf'){
+    const iframe = document.createElement('iframe');
+    iframe.src = '/documents/' + encodeURIComponent(ref.document_id) + '/original';
+    iframe.title = info.filename;
+    box.append(iframe);
+    return;
+  }
+  // DOCX/PPTX: backend отдаёт PDF-превью (GET /documents/{id}/preview → application/pdf
+  // или 404). Есть превью — показываем его в iframe, как PDF-оригинал; 404/сеть —
+  // падаем в текстовые фрагменты ниже. Blob-URL кэшируется на документ, чтобы не
+  // перекачивать PDF и не плодить объектные URL при каждом перерисовывании.
+  if (PREVIEW_TYPES.includes(docType)){
+    let url = docPreviewCache.get(ref.document_id);
+    if (url === undefined){
+      try {
+        const res = await fetch('/documents/' + encodeURIComponent(ref.document_id) + '/preview');
+        url = res.ok ? URL.createObjectURL(await res.blob()) : null;
+      } catch (_) { url = null; } // сбой сети приравниваем к «превью нет» — есть текстовый фолбэк
+      docPreviewCache.set(ref.document_id, url);
+    }
+    if (!document.body.contains(box)) return; // за время fetch экран могли сменить
+    if (url){
+      const iframe = document.createElement('iframe');
+      iframe.src = url;
+      iframe.title = info.filename;
+      box.append(iframe);
+      return;
+    }
+  }
+  // текстовые фрагменты по порядку
+  let data = docFragCache.get(ref.document_id);
+  if (!data){
+    try {
+      data = await apiJSON('/documents/' + encodeURIComponent(ref.document_id));
+      docFragCache.set(ref.document_id, data);
+    } catch (e) {
+      box.append(el('div', 'vempty', 'Не удалось загрузить документ: ' + (e.message || 'ошибка сети') + '. Оригинал можно скачать по ссылке выше.'));
+      return;
+    }
+  }
+  if (!document.body.contains(box)) return;
+  const fragments = (data.fragments || data.source_fragments || []).slice();
+  fragments.sort((a, b) => (a.page || 0) - (b.page || 0));
+  if (!fragments.length){
+    box.append(el('div', 'vempty', 'Фрагменты документа недоступны — скачайте оригинал.'));
+    return;
+  }
+  let target = null;
+  for (const f of fragments){
+    const isHit = ref.fragment_id && f.id === ref.fragment_id;
+    const d = el('div', 'frag' + (isHit ? ' hit' : ''));
+    d.append(el('span', 'fn', fragLoc(ref.document_id, f.page) + (isHit ? ' · цитируется в ответе' : '')));
+    d.append(document.createTextNode(f.text || ''));
+    box.append(d);
+    if (isHit) target = d;
+  }
+  if (target) target.scrollIntoView({ behavior: REDUCED ? 'auto' : 'smooth', block: 'center' });
+}
+
+// ==================================================================
+// Экран «Документы»
+// ==================================================================
+function viewDocs(view){
+  const wrap = el('div', 'docs');
+  const dt = el('div', 'dt');
+  dt.append(el('h3', null, 'База знаний'));
+  const hint = el('span', 'hint', '');
+  dt.append(hint);
+  wrap.append(dt);
+  const scroller = el('div');
+  scroller.style.overflowX = 'auto';
+  wrap.append(scroller);
+  view.append(wrap);
+
+  loadDocs(true).then(list => {
+    if (!document.body.contains(scroller)) return;
+    const hiddenCount = list.filter(d => d.hidden).length;
+    hint.textContent = list.length + ' ' + plural(list.length, 'документ', 'документа', 'документов')
+      + (hiddenCount ? ' · ' + hiddenCount + ' ' + plural(hiddenCount, 'скрыт', 'скрыто', 'скрыто') + ' из графа' : '')
+      + ' · перетащите файлы в плашку, чтобы добавить';
+    clear(scroller);
+    if (!list.length){
+      scroller.append(el('div', 'vempty', 'Документов пока нет — загрузите первые через плашку в шапке.'));
+      return;
+    }
+    const t = el('table', 'dlist');
+    const head = el('tr');
+    for (const h of ['Документ', 'Год', 'Научность', 'Происхождение', 'Фрагм.', '']) head.append(el('th', null, h));
+    t.append(head);
+    for (const d of list) t.append(docRow(d));
+    scroller.append(t);
+  });
+}
+
+function badge(text, cls){ return el('span', 'badge ' + cls, text); }
+
+function docRow(d){
+  const tr = el('tr', d.hidden ? 'hidden-doc' : null);
+  const name = el('td', 'name');
+  const nb = el('button', null, d.filename || d.id);
+  nb.title = 'открыть в просмотре источников';
+  nb.addEventListener('click', () => openDocView(d.id, null));
+  name.append(nb);
+  tr.append(name);
+
+  // Год издания из ТЕКСТА документа (контракт «год статьи»); нет года — «—»
+  tr.append(el('td', 'num', d.year != null ? String(d.year) : '—'));
+
+  const sci = el('td');
+  if (d.is_scientific === true) sci.append(badge('научный', 'sci'));
+  else if (d.is_scientific === false) sci.append(badge('отчёт', 'rep'));
+  else sci.append(el('span', 'badge none', '—'));
+  tr.append(sci);
+
+  const orig = el('td');
+  if (d.origin === 'ru') orig.append(badge('РФ', 'ru'));
+  else if (d.origin === 'foreign') orig.append(badge('зарубежн.', 'fo'));
+  else orig.append(el('span', 'badge none', '—'));
+  tr.append(orig);
+
+  tr.append(el('td', 'num', String(d.element_count != null ? d.element_count : '—')));
+
+  const act = el('td', 'act');
+  // глазик показываем, только если backend уже отдаёт признак hidden (мягкая деградация)
+  if ('hidden' in d){
+    const eye = el('button', 'ic-btn' + (d.hidden ? ' eye-off' : ''));
+    eye.title = d.hidden ? 'вернуть в граф' : 'скрыть из графа';
+    eye.innerHTML = d.hidden
+      ? '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6z"/><circle cx="12" cy="12" r="2.6"/><line x1="4" y1="20" x2="20" y2="4"/></svg>'
+      : '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6z"/><circle cx="12" cy="12" r="2.6"/></svg>';
+    eye.addEventListener('click', async () => {
+      try {
+        await apiJSON('/documents/' + encodeURIComponent(d.id) + '/visibility', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ hidden: !d.hidden }),
+        });
+        await loadDocs(true);
+        if (routeName() === 'docs') render();
+      } catch (e) {
+        if (e.status === 404) eye.remove(); // эндпоинт ещё не выкатан — деградируем молча
+        else alert('Не удалось изменить видимость: ' + (e.detail || e.message));
+      }
+    });
+    act.append(eye);
+  }
+  const del = el('button', 'ic-btn trash');
+  del.title = 'удалить насовсем';
+  del.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h16M9 7V5h6v2m-8 0 1 13h8l1-13"/></svg>';
+  del.addEventListener('click', async () => {
+    if (!confirm('Удалить «' + (d.filename || d.id) + '» и всё извлечённое из него? Это необратимо.')) return;
+    try {
+      await apiJSON('/documents/' + encodeURIComponent(d.id), { method: 'DELETE' });
+      docFragCache.delete(d.id);
+      const pv = docPreviewCache.get(d.id); // blob-URL превью удалённого документа больше не нужен
+      if (pv) URL.revokeObjectURL(pv);
+      docPreviewCache.delete(d.id);
+      await loadDocs(true);
+      if (routeName() === 'docs') render();
+    } catch (e) {
+      alert('Удаление не завершено: ' + (e.detail || e.message));
+    }
+  });
+  act.append(del);
+  tr.append(act);
+  return tr;
+}
+
+// ==================================================================
+// Экран Review: фильтры, сортировка, массовые действия, пачки по 50
+// ==================================================================
+const REVIEW_PAGE = 50;
+
+function viewReview(view){
+  const wrap = el('div', 'review');
+  const rhead = el('div', 'rhead'); // липкая шапка раздела: заголовок + фильтры + массовые действия
+  const h = el('h3', null, 'Проверка извлечённых фактов');
+  const tools = el('div', 'rtools'); tools.hidden = true;
+  const bulk = el('div', 'rbulk'); bulk.hidden = true;
+  const summary = el('div', 'rsummary'); summary.hidden = true;
+  const list = el('div');
+  const moreWrap = el('div');
+  rhead.append(h, tools, bulk);
+  wrap.append(rhead, summary, list, moreWrap);
+  view.append(wrap);
+  list.append(el('div', 'rempty', 'Загрузка…'));
+
+  const RV = { items: [], selected: new Set(), sortDir: 'desc', docId: '', minConf: 0, shown: REVIEW_PAGE, busy: false };
+  let selAllCb, cntEl, okAllBtn, noAllBtn;
+
+  // фильтры и сортировка — по ВСЕМУ загруженному набору
+  function filtered(){
+    let arr = RV.items;
+    if (RV.docId) arr = arr.filter(c => c.source && c.source.document_id === RV.docId);
+    if (RV.minConf > 0) arr = arr.filter(c => (Number(c.confidence) || 0) * 100 >= RV.minConf);
+    return arr.slice().sort((a, b) => {
+      const d = (Number(a.confidence) || 0) - (Number(b.confidence) || 0);
+      return RV.sortDir === 'asc' ? d : -d;
+    });
+  }
+
+  function buildTools(){
+    clear(tools);
+    const lbl = (text, ctrl) => { const l = el('label'); l.append(text + ' ', ctrl); return l; };
+
+    const sort = document.createElement('select');
+    for (const [v, t] of [['desc', 'по убыванию'], ['asc', 'по возрастанию']]){
+      const o = el('option', null, t); o.value = v; sort.append(o);
+    }
+    sort.value = RV.sortDir;
+    sort.addEventListener('change', () => { RV.sortDir = sort.value; RV.shown = REVIEW_PAGE; repaint(); });
+    tools.append(lbl('уверенность:', sort));
+
+    const docSel = document.createElement('select');
+    const all = el('option', null, 'все документы'); all.value = '';
+    docSel.append(all);
+    for (const d of (docsCache || [])){
+      const o = el('option', null, trunc(d.filename || d.id, 48)); o.value = d.id; docSel.append(o);
+    }
+    docSel.addEventListener('change', () => { RV.docId = docSel.value; RV.shown = REVIEW_PAGE; repaint(); });
+    tools.append(lbl('документ:', docSel));
+
+    const conf = document.createElement('input');
+    conf.type = 'number'; conf.min = '0'; conf.max = '100'; conf.step = '5'; conf.placeholder = '0';
+    conf.addEventListener('input', () => {
+      RV.minConf = Math.max(0, Math.min(100, Number(conf.value) || 0));
+      RV.shown = REVIEW_PAGE;
+      repaint();
+    });
+    tools.append(lbl('уверенность от, %:', conf));
+  }
+
+  function buildBulk(){
+    clear(bulk);
+    const selall = el('label', 'selall');
+    selAllCb = document.createElement('input');
+    selAllCb.type = 'checkbox';
+    selAllCb.addEventListener('change', () => {
+      if (selAllCb.checked) for (const c of filtered()) RV.selected.add(c.id);
+      else RV.selected.clear();
+      repaint();
+    });
+    selall.append(selAllCb, document.createTextNode('Выделить все'));
+    cntEl = el('span', 'cnt', '');
+    okAllBtn = el('button', 'ok', 'Подтвердить');
+    noAllBtn = el('button', 'no', 'Отклонить');
+    okAllBtn.setAttribute('aria-label', 'Подтвердить выбранные');
+    noAllBtn.setAttribute('aria-label', 'Отклонить выбранные');
+    okAllBtn.addEventListener('click', () => bulkAct('approve'));
+    noAllBtn.addEventListener('click', () => bulkAct('reject'));
+    const grp = el('div', 'grp');
+    grp.append(okAllBtn, noAllBtn);
+    bulk.append(selall, cntEl, grp);
+  }
+
+  function updateBulkState(){
+    if (!selAllCb) return;
+    const f = filtered();
+    const n = RV.selected.size;
+    cntEl.textContent = 'выбрано: ' + n;
+    selAllCb.checked = f.length > 0 && n === f.length;
+    selAllCb.indeterminate = n > 0 && n < f.length;
+    selAllCb.disabled = RV.busy || !f.length;
+    okAllBtn.disabled = noAllBtn.disabled = RV.busy || !n;
+  }
+
+  // на время любой операции (bulk или одиночной) глушим ВСЕ управляющие элементы,
+  // чтобы кандидата нельзя было обработать дважды параллельно
+  function setBusy(b){
+    RV.busy = b;
+    updateBulkState();
+    for (const ctl of list.querySelectorAll('.racts button, .rc-chk')) ctl.disabled = b;
+  }
+
+  function repaint(){
+    h.textContent = 'Проверка извлечённых фактов · ' + RV.items.length;
+    tools.hidden = bulk.hidden = !RV.items.length;
+    const f = filtered();
+    // выделение всегда подмножество отфильтрованного набора
+    const fIds = new Set(f.map(c => c.id));
+    for (const id of Array.from(RV.selected)) if (!fIds.has(id)) RV.selected.delete(id);
+    clear(list);
+    clear(moreWrap);
+    if (!RV.items.length){
+      list.append(el('div', 'rempty', 'Всё проверено ✓'));
+    } else if (!f.length){
+      list.append(el('div', 'rempty', 'Под текущие фильтры ничего не попадает'));
+    } else {
+      for (const c of f.slice(0, RV.shown)) list.append(reviewCard(c));
+      if (f.length > RV.shown){
+        const more = el('button', 'rmore',
+          'Показать ещё ' + Math.min(REVIEW_PAGE, f.length - RV.shown) + ' (скрыто ' + (f.length - RV.shown) + ')');
+        more.addEventListener('click', () => { RV.shown += REVIEW_PAGE; repaint(); });
+        moreWrap.append(more);
+      }
+    }
+    updateBulkState();
+  }
+
+  function removeItems(ids){
+    const gone = ids instanceof Set ? ids : new Set(ids);
+    RV.items = RV.items.filter(c => !gone.has(c.id));
+    for (const id of gone) RV.selected.delete(id);
+  }
+
+  function showProgress(text){
+    summary.hidden = false;
+    clear(summary);
+    summary.append(document.createTextNode(text));
+  }
+
+  function showResult(action, okCount, failed){
+    summary.hidden = false;
+    clear(summary);
+    summary.append(el('div', null,
+      (action === 'approve' ? 'Подтверждено ' : 'Отклонено ') + okCount
+      + (failed.length ? ', ошибок ' + failed.length : '')));
+    if (failed.length){
+      const ul = el('ul');
+      for (const f of failed) ul.append(el('li', null, (f && f.id ? f.id + ': ' : '') + ((f && f.error) || 'ошибка')));
+      summary.append(ul);
+    }
+  }
+
+  async function bulkAct(action){
+    const ids = Array.from(RV.selected);
+    if (!ids.length || RV.busy) return;
+    let note = null;
+    if (action === 'reject'){
+      const v = prompt('Причина отклонения для всех выбранных (необязательно):', '');
+      if (v === null) return;
+      note = v.trim() || null;
+    }
+    setBusy(true);
+    showProgress('Обработка: ' + ids.length + ' ' + plural(ids.length, 'кандидат', 'кандидата', 'кандидатов') + '…');
+    let processed = [], failed = [];
+    try {
+      const data = await apiJSON('/review/facts/bulk', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ candidate_ids: ids, action: action, note: note }),
+      });
+      failed = Array.isArray(data.failed) ? data.failed : [];
+      const bad = new Set(failed.map(x => x && x.id));
+      processed = ids.filter(id => !bad.has(id));
+    } catch (e) {
+      if (e.status !== 404){
+        setBusy(false);
+        showResult(action, 0, [{ id: null, error: e.detail || e.message || 'ошибка сети' }]);
+        repaint();
+        return;
+      }
+      // старый backend без bulk-эндпоинта — деградация: поштучно с прогрессом
+      for (let i = 0; i < ids.length; i++){
+        showProgress('Обработка ' + (i + 1) + ' / ' + ids.length + '…');
+        try {
+          if (action === 'approve'){
+            await apiJSON('/review/facts/' + encodeURIComponent(ids[i]) + '/approve', { method: 'POST' });
+          } else {
+            const opts = { method: 'POST' };
+            if (note){
+              opts.headers = { 'Content-Type': 'application/json' };
+              opts.body = JSON.stringify({ note: note });
+            }
+            await apiJSON('/review/facts/' + encodeURIComponent(ids[i]) + '/reject', opts);
+          }
+          processed.push(ids[i]);
+        } catch (err) {
+          failed.push({ id: ids[i], error: err.detail || err.message || 'ошибка' });
+        }
+      }
+    }
+    removeItems(processed);
+    setBusy(false);
+    showResult(action, processed.length, failed);
+    repaint();
+    pollReviewCount();
+  }
+
+  function reviewCard(c){
+    const card = el('div', 'rcard');
+    const chk = document.createElement('input');
+    chk.type = 'checkbox';
+    chk.className = 'rc-chk';
+    chk.checked = RV.selected.has(c.id);
+    chk.disabled = RV.busy; // repaint может случиться во время операции
+    chk.setAttribute('aria-label', 'выбрать кандидата');
+    chk.addEventListener('change', () => {
+      if (chk.checked) RV.selected.add(c.id);
+      else RV.selected.delete(c.id);
+      updateBulkState();
+    });
+    const body = el('div', 'rc-body');
+    card.append(chk, body);
+
+    const p = c.payload || {};
+    if (c.source && c.source.quote) body.append(el('div', 'rq', '«' + c.source.quote + '»'));
+
+    const rx = el('div', 'rx');
+    const bits = [];
+    for (const [label, key] of [['материал', 'material'], ['процесс', 'process'], ['свойство', 'property']]){
+      if (p[key]) bits.push([label, String(p[key])]);
+    }
+    bits.forEach(([label, value], i) => {
+      if (i) rx.append(' · ');
+      rx.append(label + ': ');
+      rx.append(el('b', null, value));
+    });
+    body.append(rx);
+
+    const nums = [];
+    if (p.effect_direction) nums.push('эффект: ' + p.effect_direction + (p.effect_value != null ? ' на ' + p.effect_value + (p.effect_unit || '') : ''));
+    if (p.temperature_c != null) nums.push('T = ' + p.temperature_c + ' °C');
+    if (p.duration_h != null) nums.push('t = ' + p.duration_h + ' ч');
+    if (p.result_value != null) nums.push('результат: ' + p.result_value + (p.result_unit ? ' ' + p.result_unit : ''));
+    if (nums.length) body.append(el('div', 'rx', nums.join(' · ')));
+
+    const meta = [];
+    meta.push('confidence ' + Number(c.confidence || 0).toFixed(2));
+    if (c.source && c.source.document_id)
+      meta.push(docName(c.source.document_id) + ' · ' + fragLoc(c.source.document_id, c.source.page));
+    body.append(el('div', 'rmeta', meta.join(' · ')));
+
+    // замечания валидации: контрактный payload.validation.issues либо фактический number_validation.issues
+    const validation = p.validation || p.number_validation || {};
+    const issues = Array.isArray(validation.issues) ? validation.issues : [];
+    for (const issue of issues) body.append(el('div', 'rwarn', String(issue)));
+    if (c.review_note && !issues.length) body.append(el('div', 'rwarn', c.review_note));
+
+    const acts = el('div', 'racts');
+    const okBtn = el('button', 'ok', 'Подтвердить');
+    const noBtn = el('button', 'no', 'Отклонить');
+    okBtn.disabled = noBtn.disabled = RV.busy; // repaint может случиться во время операции
+    const finish = () => {
+      removeItems([c.id]);
+      repaint();
+      pollReviewCount();
+    };
+    okBtn.addEventListener('click', async () => {
+      if (RV.busy) return;
+      setBusy(true);
+      try {
+        await apiJSON('/review/facts/' + encodeURIComponent(c.id) + '/approve', { method: 'POST' });
+        setBusy(false);
+        finish();
+      } catch (e) {
+        setBusy(false);
+        alert('Не удалось подтвердить: ' + (e.detail || e.message));
+      }
+    });
+    noBtn.addEventListener('click', async () => {
+      if (RV.busy) return;
+      const note = prompt('Причина отклонения (необязательно):', '');
+      if (note === null) return;
+      setBusy(true);
+      try {
+        const opts = { method: 'POST' };
+        if (note.trim()){
+          opts.headers = { 'Content-Type': 'application/json' };
+          opts.body = JSON.stringify({ note: note.trim() });
+        }
+        await apiJSON('/review/facts/' + encodeURIComponent(c.id) + '/reject', opts);
+        setBusy(false);
+        finish();
+      } catch (e) {
+        setBusy(false);
+        alert('Не удалось отклонить: ' + (e.detail || e.message));
+      }
+    });
+    acts.append(okBtn, noBtn);
+    body.append(acts);
+    return card;
+  }
+
+  Promise.all([apiJSON('/review/facts?status=pending_review'), loadDocs()])
+    .then(([cands]) => {
+      if (!document.body.contains(list)) return;
+      RV.items = Array.isArray(cands) ? cands : [];
+      buildTools();
+      buildBulk();
+      repaint();
+    })
+    .catch(e => {
+      if (!document.body.contains(list)) return;
+      clear(list);
+      list.append(el('div', 'rempty', 'Не удалось загрузить очередь: ' + (e.message || 'ошибка сети')));
+    });
+}
+
+// ==================================================================
+// Красная точка Review
+// ==================================================================
+async function pollReviewCount(){
+  const dot = $('#review-dot');
+  try {
+    const data = await apiJSON('/review/count');
+    dot.hidden = !(data && data.pending > 0);
+  } catch (_) {
+    dot.hidden = true; // эндпоинт недоступен — точку прячем
+  }
+}
+setInterval(pollReviewCount, 60000);
+
+// ==================================================================
+// Статус систем
+// ==================================================================
+function healthColor(h, failed){
+  if (failed || !h) return 'bad';
+  if (h.postgres === 'memory' || h.neo4j === 'memory') return 'bad';
+  const errs = [h.postgres_last_error, h.neo4j_last_error, h.minio_last_error];
+  if (errs.some(e => e) || h.answer_llm_status !== 'configured') return 'warn';
+  return 'ok';
+}
+
+async function pollHealth(){
+  const prev = S.health.color;
+  try {
+    S.health.data = await apiJSON('/health');
+    S.health.failed = false;
+  } catch (_) {
+    S.health.failed = true;
+  }
+  S.health.at = Date.now();
+  S.health.color = healthColor(S.health.data, S.health.failed);
+  const dot = $('#sysdot');
+  dot.className = 'sysdot' + (S.health.color === 'warn' ? ' warn' : S.health.color === 'bad' ? ' bad' : '');
+  if (prev !== S.health.color && !REDUCED){
+    dot.classList.add('changed');
+    setTimeout(() => dot.classList.remove('changed'), 2200);
+  }
+  if (!$('#syspop').hidden) paintSyspop();
+}
+setInterval(pollHealth, 15000);
+
+function paintSyspop(){
+  const pop = $('#syspop');
+  clear(pop);
+  const h = S.health.data;
+  const titles = { ok: 'всё в норме', warn: 'есть деградация', bad: 'есть сбой' };
+  pop.append(el('div', 't', 'Системы · ' + titles[S.health.color]));
+  const row = (name, val, cls) => {
+    const r = el('div', 'row');
+    r.append(el('i', cls || ''), document.createTextNode(name), el('span', null, val));
+    pop.append(r);
+  };
+  if (S.health.failed || !h){
+    row('Backend', 'нет ответа', 'bad');
+  } else {
+    row('Backend', h.status || '—', h.status === 'ok' ? '' : 'warn');
+    row('Extraction', h.extraction || '—', '');
+    row('PostgreSQL', h.postgres || '—', h.postgres === 'enabled' ? (h.postgres_last_error ? 'warn' : '') : 'bad');
+    row('Neo4j', h.neo4j || '—', h.neo4j === 'enabled' ? (h.neo4j_last_error ? 'warn' : '') : 'bad');
+    row('MinIO', h.minio || '—', h.minio === 'enabled' ? (h.minio_last_error ? 'warn' : '') : 'warn');
+    const llmVal = [h.answer_llm_provider, h.answer_llm_model].filter(Boolean).join(' · ') || h.answer_llm_status || '—';
+    row('LLM', llmVal, h.answer_llm_status === 'configured' ? '' : 'warn');
+  }
+  const lastErr = h ? (h.postgres_last_error || h.neo4j_last_error || h.minio_last_error || h.answer_llm_error) : null;
+  const ago = Math.max(0, Math.round((Date.now() - S.health.at) / 1000));
+  pop.append(el('div', 'ft', 'Последняя ошибка: ' + (lastErr ? trunc(String(lastErr), 90) : 'нет') + ' · обновлено ' + ago + ' с назад'));
+}
+
+$('#sysdot').addEventListener('mouseenter', () => { paintSyspop(); $('#syspop').hidden = false; });
+$('#sysdot').addEventListener('mouseleave', () => { if (!S.health.pinned) $('#syspop').hidden = true; });
+$('#sysdot').addEventListener('click', () => {
+  S.health.pinned = !S.health.pinned;
+  paintSyspop();
+  $('#syspop').hidden = !S.health.pinned && $('#syspop').hidden;
+  if (S.health.pinned) $('#syspop').hidden = false;
+});
+document.addEventListener('click', e => {
+  if (S.health.pinned && !e.target.closest('#syspop') && !e.target.closest('#sysdot')){
+    S.health.pinned = false;
+    $('#syspop').hidden = true;
+  }
+});
+
+// ==================================================================
+// Загрузка документов (плашка в шапке)
+// ==================================================================
+const uplEl = $('#upl');
+const fileInput = $('#file-input');
+uplEl.addEventListener('click', e => {
+  if (e.target.closest('#upl-pop')) return;
+  fileInput.click();
+});
+uplEl.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' '){ e.preventDefault(); fileInput.click(); } });
+fileInput.addEventListener('change', () => { onFiles(fileInput.files); fileInput.value = ''; });
+uplEl.addEventListener('dragover', e => { e.preventDefault(); uplEl.classList.add('dragging'); });
+uplEl.addEventListener('dragleave', () => uplEl.classList.remove('dragging'));
+uplEl.addEventListener('drop', e => {
+  e.preventDefault();
+  uplEl.classList.remove('dragging');
+  if (e.dataTransfer && e.dataTransfer.files) onFiles(e.dataTransfer.files);
+});
+
+function onFiles(fileList){
+  for (const f of Array.from(fileList || [])) uploadOne(f);
+  paintUplPop(true);
+}
+
+async function uploadOne(file){
+  const entry = { name: file.name, status: 'в очереди', kind: 'wait', error: null };
+  S.uploads.unshift(entry);
+  paintUplPop(true);
+  try {
+    const fd = new FormData();
+    fd.append('file', file, file.name);
+    const data = await apiJSON('/ingest', { method: 'POST', body: fd });
+    if (data.job_id){
+      entry.status = 'в очереди';
+      pollJob(entry, data.job_id);
+    } else {
+      // синхронный режим или дубль — документ уже в базе
+      entry.status = 'готово ✓';
+      entry.kind = 'ok';
+      onUploadDone();
+    }
+  } catch (e) {
+    entry.status = 'ошибка ✗';
+    entry.kind = 'err';
+    entry.error = e.detail || e.message;
+  }
+  paintUplPop();
+}
+
+const JOB_404_LIMIT = 5;  // подряд 404 — джоба потеряна (перезапуск backend без очереди)
+const JOB_NET_LIMIT = 20; // подряд сетевых/прочих ошибок — сдаёмся с тем же исходом
+
+function pollJob(entry, jobId){
+  let miss404 = 0, missNet = 0;
+  const lost = () => {
+    entry.status = '✗ задача потеряна'; entry.kind = 'err';
+    entry.error = 'перезагрузите файл';
+    paintUplPop();
+  };
+  const tick = async () => {
+    try {
+      const job = await apiJSON('/jobs/' + encodeURIComponent(jobId));
+      miss404 = missNet = 0;
+      if (job.status === 'completed'){
+        entry.status = 'готово ✓'; entry.kind = 'ok';
+        paintUplPop();
+        onUploadDone();
+        return;
+      }
+      if (job.status === 'failed'){
+        entry.status = 'ошибка ✗'; entry.kind = 'err';
+        entry.error = job.error || 'обработка не удалась';
+        paintUplPop();
+        return;
+      }
+      entry.status = job.status === 'processing' ? 'обработка…' : 'в очереди';
+      paintUplPop();
+    } catch (e) {
+      // 404 — джоба неизвестна backend'у; всё остальное (сеть, 5xx) — свой счётчик
+      if (e && e.status === 404){
+        if (++miss404 >= JOB_404_LIMIT){ lost(); return; }
+      } else if (++missNet >= JOB_NET_LIMIT){ lost(); return; }
+    }
+    setTimeout(tick, 4000);
+  };
+  setTimeout(tick, 4000);
+}
+
+function onUploadDone(){
+  loadDocs(true).then(() => {
+    // ненавязчивое обновление, если открыта база знаний
+    if (routeName() === 'docs') render();
+  });
+  pollReviewCount();
+}
+
+function paintUplPop(open){
+  const pop = $('#upl-pop');
+  if (open) pop.hidden = false;
+  if (pop.hidden) return;
+  clear(pop);
+  pop.append(el('div', 't', 'Загрузки'));
+  if (!S.uploads.length){
+    pop.append(el('div', 'u-row', 'Перетащите файлы на плашку или кликните по ней.'));
+    return;
+  }
+  for (const u of S.uploads.slice(0, 8)){
+    const row = el('div', 'u-row');
+    row.append(el('span', 'u-name', u.name));
+    row.append(el('span', 'u-st' + (u.kind === 'ok' ? ' ok' : u.kind === 'err' ? ' err' : ''), u.status));
+    pop.append(row);
+    if (u.error) pop.append(el('div', 'u-err', trunc(u.error, 160)));
+  }
+}
+document.addEventListener('click', e => {
+  const pop = $('#upl-pop');
+  if (!pop.hidden && !e.target.closest('#upl')) pop.hidden = true;
+});
+
+// ==================================================================
+// Клавиатура и поиск в шапке
+// ==================================================================
+const hdrQ = $('#hdr-q');
+const runHdrSearch = () => { const v = hdrQ.value; hdrQ.value = ''; ask(v); };
+$('#hdr-search').append(searchIcon(runHdrSearch));
+hdrQ.addEventListener('keydown', e => { if (e.key === 'Enter') runHdrSearch(); });
+
+// актуальная высота шапки — в --hdr-h (sticky-панели, липкая шапка review, центровка оффтопа)
+function syncHdrH(){
+  // getBoundingClientRect: субпиксельная точность, чтобы под липкими блоками не было щели
+  document.documentElement.style.setProperty('--hdr-h', $('#hdr').getBoundingClientRect().height + 'px');
+}
+new ResizeObserver(syncHdrH).observe($('#hdr'));
+syncHdrH();
+
+document.addEventListener('keydown', e => {
+  if ((e.metaKey || e.ctrlKey) && String(e.key).toLowerCase() === 'k'){
+    e.preventDefault();
+    const target = $('#home-q') || $('#hdr-q');
+    if (target){ target.focus(); target.select(); }
+    return;
+  }
+  if (e.key === 'Escape'){
+    hideFnpop();
+    closeGraphOverlay();
+    $('#upl-pop').hidden = true;
+    S.health.pinned = false;
+    $('#syspop').hidden = true;
+  }
+});
+
+// ==================================================================
+// Старт
+// ==================================================================
+pollHealth();
+pollReviewCount();
+loadDocs();
+render();
+</script>
+</body>
+</html>

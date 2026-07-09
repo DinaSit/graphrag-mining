@@ -12,6 +12,10 @@ except ImportError:  # pragma: no cover
 
 log = logging.getLogger(__name__)
 
+# Ключ PDF-превью офисного документа: <ключ оригинала> + этот суффикс —
+# превью лежит в бакете рядом с оригиналом
+PREVIEW_SUFFIX = ".preview.pdf"
+
 
 @dataclass(frozen=True)
 class StoredObject:
@@ -72,6 +76,91 @@ class MinioFileStorage:
             # инжест должен завершиться как failed с текстом ошибки
             self.last_error = str(exc)
             log.error("MinIO: файл документа %s не сохранён: %s", document_id, exc)
+            raise
+
+    def put_preview(self, object_name: str, content: bytes) -> bool:
+        """Кладёт PDF-превью офисного документа по точному ключу (рядом с оригиналом).
+
+        Превью необязательно: любой сбой не пробрасывается (warning в лог,
+        False) — инжест не должен падать из-за недоступного MinIO.
+        """
+        if not self.enabled:
+            return False
+        try:
+            client = self._get_client()
+            assert self.bucket is not None
+            if not client.bucket_exists(self.bucket):
+                client.make_bucket(self.bucket)
+            client.put_object(
+                self.bucket,
+                object_name,
+                io.BytesIO(content),
+                length=len(content),
+                content_type="application/pdf",
+            )
+            self.last_error = None
+            return True
+        except Exception as exc:
+            self.last_error = str(exc)
+            log.warning("MinIO: PDF-превью %s не сохранено: %s", object_name, exc)
+            return False
+
+    def get_object(self, object_name: str) -> bytes | None:
+        """Содержимое объекта по точному ключу (оригинал или превью).
+
+        None — хранилище выключено, объекта нет или сбой MinIO (ошибка в лог,
+        не пробрасывается: вызывающие пути отвечают 404/пропуском).
+        """
+        if not self.enabled:
+            return None
+        try:
+            client = self._get_client()
+            assert self.bucket is not None
+            response = client.get_object(self.bucket, object_name)
+            try:
+                data = response.read()
+            finally:
+                response.close()
+                response.release_conn()
+            self.last_error = None
+            return data
+        except Exception as exc:
+            self.last_error = str(exc)
+            log.error("MinIO: объект %s не получен: %s", object_name, exc)
+            return None
+
+    def get_document(self, document_id: str) -> tuple[bytes, str] | None:
+        """Оригинальный файл документа: (содержимое, имя объекта в бакете).
+
+        None — хранилище выключено или файла нет; ошибки MinIO пробрасываются
+        (клиент должен увидеть сбой, а не пустой ответ).
+        """
+        if not self.enabled:
+            return None
+        try:
+            client = self._get_client()
+            assert self.bucket is not None
+            prefix = f"documents/{document_id}/"
+            objects = [
+                obj for obj in client.list_objects(self.bucket, prefix=prefix, recursive=True)
+                # PDF-превью лежит под тем же префиксом — оригиналом не считается
+                if not obj.object_name.endswith(PREVIEW_SUFFIX)
+            ]
+            if not objects:
+                return None
+            # У документа одна версия — под префиксом лежит один оригинал
+            object_name = objects[0].object_name
+            response = client.get_object(self.bucket, object_name)
+            try:
+                data = response.read()
+            finally:
+                response.close()
+                response.release_conn()
+            self.last_error = None
+            return data, Path(object_name).name
+        except Exception as exc:
+            self.last_error = str(exc)
+            log.error("MinIO: файл документа %s не получен: %s", document_id, exc)
             raise
 
     def delete_document(self, document_id: str) -> None:

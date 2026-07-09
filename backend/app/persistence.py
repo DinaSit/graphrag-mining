@@ -5,15 +5,14 @@ import logging
 import os
 from typing import Any
 
+from app.pipeline.normalization import JUNK_VALUES, slug
 from app.schemas import (
+    ONTOLOGY_LABELS,
     CandidateStatus,
     DocumentRecord,
     DocumentVersion,
     ExtractionCandidate,
     Fact,
-    GraphEdge,
-    GraphNode,
-    GraphPayload,
     OntologyCandidate,
     SourceFragment,
     SourceRef,
@@ -53,9 +52,10 @@ class PostgresSink:
             """
             INSERT INTO documents (
               id, filename, document_type, source_label, access_level, checksum, current_version_id, status,
-              element_count, storage_bucket, storage_object, storage_uri, created_at
+              element_count, storage_bucket, storage_object, storage_uri, created_at, hidden, is_scientific, origin,
+              year, preview_object
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (id) DO UPDATE SET
               filename = EXCLUDED.filename,
               document_type = EXCLUDED.document_type,
@@ -66,7 +66,12 @@ class PostgresSink:
               element_count = EXCLUDED.element_count,
               storage_bucket = EXCLUDED.storage_bucket,
               storage_object = EXCLUDED.storage_object,
-              storage_uri = EXCLUDED.storage_uri
+              storage_uri = EXCLUDED.storage_uri,
+              hidden = EXCLUDED.hidden,
+              is_scientific = EXCLUDED.is_scientific,
+              origin = EXCLUDED.origin,
+              year = EXCLUDED.year,
+              preview_object = EXCLUDED.preview_object
             """,
             (
                 document.id,
@@ -82,6 +87,11 @@ class PostgresSink:
                 document.storage_object,
                 document.storage_uri,
                 document.created_at,
+                document.hidden,
+                document.is_scientific,
+                document.origin,
+                document.year,
+                document.preview_object,
             ),
         )
         self._execute(
@@ -113,7 +123,8 @@ class PostgresSink:
                           d.id, d.filename, d.document_type, d.source_label, d.access_level, d.checksum,
                           d.current_version_id, d.status, d.element_count, d.storage_bucket, d.storage_object,
                           d.storage_uri, d.created_at,
-                          v.id, v.document_id, v.checksum, v.version_number, v.status, v.parser, v.created_at
+                          v.id, v.document_id, v.checksum, v.version_number, v.status, v.parser, v.created_at,
+                          d.hidden, d.is_scientific, d.origin, d.year, d.preview_object
                         FROM documents d
                         JOIN document_versions v ON v.id = d.current_version_id
                         WHERE d.checksum = %s
@@ -138,6 +149,11 @@ class PostgresSink:
                 storage_object=row[10],
                 storage_uri=row[11],
                 created_at=row[12],
+                hidden=bool(row[20]),
+                is_scientific=row[21],
+                origin=row[22],
+                year=row[23],
+                preview_object=row[24],
             )
             version = DocumentVersion(
                 id=row[13],
@@ -286,6 +302,15 @@ class PostgresSink:
             "ALTER TABLE documents ADD COLUMN IF NOT EXISTS storage_bucket VARCHAR(256)",
             "ALTER TABLE documents ADD COLUMN IF NOT EXISTS storage_object VARCHAR(1024)",
             "ALTER TABLE documents ADD COLUMN IF NOT EXISTS storage_uri VARCHAR(1400)",
+            # Скрытие из ответов и эвристические признаки документа
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS hidden BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS is_scientific BOOLEAN",
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS origin TEXT",
+            # Год издания из текста документа; NULL — ещё не вычислен/не найден
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS year INTEGER",
+            # Ключ PDF-превью DOCX/PPTX в MinIO (<storage_object>.preview.pdf);
+            # NULL — превью нет. 1024 (storage_object) + суффикс ".preview.pdf"
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS preview_object VARCHAR(1040)",
             "ALTER TABLE facts ADD COLUMN IF NOT EXISTS conflicts_with JSONB NOT NULL DEFAULT '[]'::jsonb",
             # Индекс векторного поиска: близость считает PostgreSQL, а не backend
             "CREATE INDEX IF NOT EXISTS fragment_vectors_embedding_idx ON fragment_vectors USING hnsw (embedding vector_cosine_ops)",
@@ -308,36 +333,6 @@ class PostgresSink:
         for statement in statements:
             self._execute(statement, ())
 
-    def list_facts(self) -> list[dict[str, Any]]:
-        if not self.enabled:
-            return []
-        try:
-            with psycopg.connect(self.database_url) as connection:
-                with connection.cursor() as cursor:
-                    cursor.execute(
-                        """
-                        SELECT id, material, property, status, confidence, is_hypothesis, conflicts_with, source
-                        FROM facts ORDER BY id
-                        """
-                    )
-                    return [
-                        {
-                            "id": row[0],
-                            "material": row[1],
-                            "property": row[2],
-                            "status": row[3],
-                            "confidence": row[4],
-                            "is_hypothesis": row[5],
-                            "conflicts_with": row[6] or [],
-                            "source": row[7],
-                        }
-                        for row in cursor.fetchall()
-                    ]
-        except Exception as exc:  # pragma: no cover - integration-only path
-            self.last_error = str(exc)
-            log.error("PostgreSQL: чтение facts не выполнено: %s", exc)
-            return []
-
     def delete_document_data(self, document_id: str) -> None:
         """Каскадное удаление всего, что связано с документом (порядок — по FK)."""
         if not self.enabled:
@@ -353,24 +348,6 @@ class PostgresSink:
         ]
         for statement in statements:
             self._execute(statement, (document_id,))
-
-    def upsert_ontology_candidate(self, candidate: OntologyCandidate) -> None:
-        """Фиксирует решение инженера знаний по кандидату нового типа онтологии."""
-        if not self.enabled:
-            return
-        self._execute(
-            """
-            INSERT INTO ontology_versions (id, version, status, config)
-            VALUES (%s, %s, %s, %s::jsonb)
-            ON CONFLICT (id) DO UPDATE SET status = EXCLUDED.status, config = EXCLUDED.config
-            """,
-            (
-                candidate.id,
-                ONTOLOGY_CANDIDATE_KIND,
-                candidate.status.value if isinstance(candidate.status, CandidateStatus) else candidate.status,
-                json.dumps(candidate.model_dump(mode="json"), ensure_ascii=False),
-            ),
-        )
 
     def upsert_job(self, job_id: str, job_type: str, status: str, payload: dict, error: str | None = None) -> None:
         if not self.enabled:
@@ -447,7 +424,7 @@ class PostgresSink:
                         """
                         SELECT id, filename, document_type, source_label, access_level, checksum,
                                current_version_id, status, element_count, storage_bucket, storage_object,
-                               storage_uri, created_at
+                               storage_uri, created_at, hidden, is_scientific, origin, year, preview_object
                         FROM documents
                         """
                     )
@@ -466,6 +443,11 @@ class PostgresSink:
                             storage_object=row[10],
                             storage_uri=row[11],
                             created_at=row[12],
+                            hidden=bool(row[13]),
+                            is_scientific=row[14],
+                            origin=row[15],
+                            year=row[16],
+                            preview_object=row[17],
                         )
 
                     cursor.execute(
@@ -605,6 +587,12 @@ class Neo4jSink:
                 self._ensure_constraints()
             except Exception as exc:
                 log.error("Neo4j: constraints при старте не применены: %s", exc)
+            # Исторический мусор ('не указано', 'unknown'…) из прежних загрузок
+            # вычищается один раз при старте — после constraints
+            try:
+                self._cleanup_junk_nodes()
+            except Exception as exc:
+                log.error("Neo4j: зачистка мусорных узлов при старте не выполнена: %s", exc)
 
     @property
     def enabled(self) -> bool:
@@ -626,10 +614,26 @@ class Neo4jSink:
         with self._get_driver().session() as session:
             for label in labels:
                 session.run(
-                    f"CREATE CONSTRAINT {_slug(label)}_id IF NOT EXISTS "
+                    f"CREATE CONSTRAINT {slug(label)}_id IF NOT EXISTS "
                     f"FOR (n:{label}) REQUIRE n.id IS UNIQUE"
                 )
         self._constraints_applied = True
+
+    def _cleanup_junk_nodes(self) -> None:
+        """Идемпотентно вычищает исторический мусор: узлы онтологических меток,
+        чьё name (после toLower/ё→е) входит в список мусорных подписей КГ.
+        DETACH DELETE — вместе со связями. Ошибки логируются выше, не роняют старт."""
+        # ё→е нормализуется на стороне Cypher (replace), список — единый JUNK_VALUES
+        junk = [value for value in JUNK_VALUES if value]
+        labels = sorted(self.ONTOLOGY_LABELS | {"Effect", "Laboratory"})
+        with self._get_driver().session() as session:
+            for label in labels:
+                session.run(
+                    f"MATCH (n:{label}) "
+                    "WHERE replace(toLower(coalesce(n.name, '')), 'ё', 'е') IN $junk "
+                    "DETACH DELETE n",
+                    junk=junk,
+                )
 
     def upsert_fact(self, fact: Fact) -> None:
         if not self.enabled:
@@ -663,13 +667,13 @@ class Neo4jSink:
             "temperature_c": fact.temperature_c,
             "duration_h": fact.duration_h,
             "process": fact.process,
-            "property_id": f"property-{_slug(fact.property)}",
+            "property_id": f"property-{slug(fact.property)}",
             "property": fact.property,
             "effect_id": f"effect-{fact.effect_direction}-{fact.experiment_id}",
             "effect_direction": fact.effect_direction,
             "effect_value": fact.effect_value,
             "effect_unit": fact.effect_unit,
-            "lab_id": f"lab-{_slug(fact.lab)}",
+            "lab_id": f"lab-{slug(fact.lab)}",
             "lab": fact.lab,
             "source_id": fact.source.fragment_id,
             "document_id": fact.source.document_id,
@@ -682,12 +686,9 @@ class Neo4jSink:
         }
         self._write(query, params)
 
-    # Типы узлов и связей доменной онтологии (domain/default/ontology.yaml).
-    # Whitelist обязателен: label и тип связи нельзя параметризовать в Cypher.
-    ONTOLOGY_LABELS = {
-        "Material", "Process", "Equipment", "Property", "NumericParameter", "Condition",
-        "Experiment", "Publication", "Expert", "Facility", "Result", "Recommendation", "Region",
-    }
+    # Типы узлов и связей доменной онтологии. Whitelist обязателен: label и тип
+    # связи нельзя параметризовать в Cypher. Список меток — единый из schemas.
+    ONTOLOGY_LABELS = frozenset(ONTOLOGY_LABELS)
     ONTOLOGY_RELATIONS = {
         "applies_to", "uses_material", "operates_at_condition", "measured_parameter",
         "produced_effect", "validated_by", "contradicts", "authored_by", "expert_in",
@@ -707,7 +708,7 @@ class Neo4jSink:
             self._write(
                 f"MERGE (n:{label} {{id: $id}}) SET n.name = $name "
                 f"WITH n MATCH (c:Claim {{id: $claim_id}}) MERGE (c)-[:MENTIONS]->(n)",
-                {"id": f"{label.lower()}-{_slug(name)}", "name": name, "claim_id": claim_id},
+                {"id": f"{label.lower()}-{slug(name)}", "name": name, "claim_id": claim_id},
             )
         for relation in relations:
             subject, predicate, obj = relation.get("subject"), relation.get("predicate"), relation.get("object")
@@ -720,8 +721,8 @@ class Neo4jSink:
                 f"MATCH (a:{subject_label} {{id: $subject_id}}), (b:{object_label} {{id: $object_id}}) "
                 f"MERGE (a)-[:{predicate}]->(b)",
                 {
-                    "subject_id": f"{subject_label.lower()}-{_slug(subject)}",
-                    "object_id": f"{object_label.lower()}-{_slug(obj)}",
+                    "subject_id": f"{subject_label.lower()}-{slug(subject)}",
+                    "object_id": f"{object_label.lower()}-{slug(obj)}",
                 },
             )
 
@@ -751,53 +752,6 @@ class Neo4jSink:
         self._write("MATCH (e:Experiment) WHERE NOT (e)<-[:BASED_ON]-() DETACH DELETE e", {})
         self._write("MATCH (n) WHERE NOT (n)--() DELETE n", {})
 
-    def get_graph(self, limit: int = 80) -> GraphPayload:
-        if not self.enabled:
-            return GraphPayload()
-        query = """
-        MATCH (a)-[r]->(b)
-        RETURN a, type(r) AS rel, b
-        LIMIT $limit
-        """
-        return self._read_graph(query, {"limit": limit})
-
-    def get_entity_graph(self, entity_id: str, depth: int = 2) -> GraphPayload:
-        """Окрестность сущности: все связи между узлами в радиусе depth."""
-        if not self.enabled:
-            return GraphPayload()
-        # Глубина подставляется в текст запроса (Cypher не параметризует длину
-        # пути), поэтому ограничивается явным диапазоном
-        depth = max(1, min(int(depth), 5))
-        query = (
-            f"MATCH (n {{id: $entity_id}})-[*1..{depth}]-(m) "
-            "WITH collect(DISTINCT n) + collect(DISTINCT m) AS ns "
-            "UNWIND ns AS a MATCH (a)-[r]->(b) WHERE b IN ns "
-            "RETURN DISTINCT a, type(r) AS rel, b LIMIT $limit"
-        )
-        return self._read_graph(query, {"entity_id": entity_id, "limit": 200})
-
-    def _read_graph(self, query: str, params: dict[str, Any]) -> GraphPayload:
-        nodes: dict[str, GraphNode] = {}
-        edges: dict[str, GraphEdge] = {}
-        try:
-            with self._get_driver().session() as session:
-                for record in session.run(query, **params):
-                    left = record["a"]
-                    right = record["b"]
-                    rel = record["rel"]
-                    left_id = left.get("id")
-                    right_id = right.get("id")
-                    if not left_id or not right_id:
-                        continue
-                    nodes[left_id] = _node_from_neo4j(left)
-                    nodes[right_id] = _node_from_neo4j(right)
-                    edge_id = f"{left_id}-{rel}-{right_id}"
-                    edges[edge_id] = GraphEdge(id=edge_id, source=left_id, target=right_id, label=rel)
-        except Exception as exc:  # pragma: no cover - integration-only path
-            self.last_error = str(exc)
-            log.error("Neo4j: чтение графа не выполнено: %s", exc)
-        return GraphPayload(nodes=list(nodes.values()), edges=list(edges.values()))
-
     def _write(self, query: str, params: dict[str, Any]) -> None:
         try:
             self._ensure_constraints()
@@ -816,16 +770,3 @@ def _normalize_database_url(value: str | None) -> str | None:
     if not value:
         return None
     return value.replace("postgresql+psycopg://", "postgresql://")
-
-
-def _slug(value: str) -> str:
-    cleaned = "".join(char.lower() if char.isalnum() else "-" for char in value.strip())
-    return "-".join(part for part in cleaned.split("-") if part)
-
-
-def _node_from_neo4j(node: Any) -> GraphNode:
-    labels = list(node.labels)
-    node_type = labels[0] if labels else "Entity"
-    node_id = node.get("id")
-    label = node.get("name") or node.get("quote") or node_id
-    return GraphNode(id=node_id, label=str(label)[:80], type=node_type, data=dict(node))
