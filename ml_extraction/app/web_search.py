@@ -60,7 +60,6 @@ ALLOWED_DOMAINS = [
     "cyberleninka.ru",
     "onlinelibrary.wiley.com",
     "sciencedirect.com",
-    "sci-hub.ru",
 ]
 
 _ANSWER_PROMPT = """Ты — научный ассистент горно-металлургического R&D.

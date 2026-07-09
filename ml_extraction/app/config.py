@@ -3,7 +3,9 @@ import os
 from pathlib import Path
 
 YANDEX_API_KEY = os.environ.get("YANDEX_API_KEY", "")
-YANDEX_FOLDER_ID = os.environ.get("YANDEX_FOLDER_ID", "b1ggusvist6c2sia1dno")
+# Folder id задаётся ТОЛЬКО окружением (.env): дефолт в коде публиковал бы
+# реальный идентификатор каталога в репозитории
+YANDEX_FOLDER_ID = os.environ.get("YANDEX_FOLDER_ID", "")
 YANDEX_BASE_URL = os.environ.get("YANDEX_BASE_URL", "https://llm.api.cloud.yandex.net/v1")
 
 # Короткое имя достраивается до gpt://<folder>/<name>; полный URI можно задать напрямую

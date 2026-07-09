@@ -19,7 +19,7 @@ services:
       # включая postgres) — без ключа стек поднимается, а извлечение отвечает явной
       # ошибкой авторизации: документ помечается failed с понятной причиной
       YANDEX_API_KEY: ${YANDEX_API_KEY:-}
-      YANDEX_FOLDER_ID: ${YANDEX_FOLDER_ID:-b1ggusvist6c2sia1dno}
+      YANDEX_FOLDER_ID: ${YANDEX_FOLDER_ID:-}
       # LLM-провайдер задаётся в .env: Yandex AI Studio (по умолчанию) или любой
       # OpenAI-совместимый сервер (Ollama: http://host.docker.internal:11434/v1)
       YANDEX_BASE_URL: ${YANDEX_BASE_URL:-https://llm.api.cloud.yandex.net/v1}
