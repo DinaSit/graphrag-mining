@@ -11,17 +11,17 @@ logger = logging.getLogger(__name__)
 def convert_office_to_pdf(content: bytes, suffix: str, timeout: float = 40) -> bytes | None:
     """Конвертирует офисный файл (DOCX/DOCM/PPTX) в PDF через headless LibreOffice.
 
-    Чистая механика без LLM: входные байты пишутся во временный файл с исходным
-    расширением, конвертация — subprocess soffice --convert-to pdf. Возвращает
-    БАЙТЫ PDF или None при любом сбое: отсутствие soffice, таймаут, ошибка или
-    пустой результат конвертации. Исключения наружу не пробрасываются — только
-    warning в лог. Временные файлы вычищаются.
+    Механическая конвертация без LLM: входные байты записываются во временный файл
+    с исходным расширением, конвертация — subprocess soffice --convert-to pdf.
+    Возвращает БАЙТЫ PDF или None при любом сбое: отсутствие soffice, таймаут,
+    ошибка или пустой результат конвертации. Исключения наружу не пробрасываются —
+    только warning в лог. Временные файлы удаляются.
     """
     suffix = suffix if suffix.startswith(".") else f".{suffix}"
     with tempfile.TemporaryDirectory(prefix="office-render-") as tmpdir:
         input_path = os.path.join(tmpdir, f"input{suffix}")
-        # Отдельный профиль LibreOffice во временной папке, чтобы не упереться в
-        # блокировку общего профиля при параллельных конвертациях
+        # Отдельный профиль LibreOffice во временной папке, чтобы избежать
+        # блокировки общего профиля при параллельных конвертациях
         profile_uri = f"file://{os.path.join(tmpdir, 'lo-profile')}"
         try:
             with open(input_path, "wb") as handle:
@@ -55,6 +55,7 @@ def convert_office_to_pdf(content: bytes, suffix: str, timeout: float = 40) -> b
             logger.warning("Office->PDF skipped: unexpected error: %s", exc)
             return None
 
+        # soffice именует результат по базовому имени входа: input<suffix> → input.pdf
         pdf_path = os.path.join(tmpdir, "input.pdf")
         try:
             with open(pdf_path, "rb") as handle:

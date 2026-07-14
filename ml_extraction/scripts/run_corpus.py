@@ -5,7 +5,7 @@
 фрагменты отправляются в запущенный сервис извлечения по HTTP.
 
 Запуск:
-    1) поднять сервис: docker compose up ml-extraction
+    1) запустить сервис: docker compose up ml-extraction
        (либо локально: cd ml_extraction && uvicorn app.main:app --port 8002)
     2) python scripts/run_corpus.py --src <папка с документами> --out results/ [--limit N]
 
@@ -22,7 +22,7 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_ROOT / "backend"))
 
-# .env корня репо — для локального запуска
+# .env корня репозитория — для локального запуска
 _env_file = _ROOT / ".env"
 if _env_file.exists():
     for line in _env_file.read_text().splitlines():
@@ -68,7 +68,10 @@ async def main() -> int:
         t0 = time.monotonic()
         try:
             parser = choose_parser(path.name)
+            # document_id/version_id фиктивные: скрипт не пишет в базу, id нужны
+            # лишь для обязательных полей SourceFragment и трассировки в JSON
             fragments = parser.parse(f"doc-{path.stem[:40]}", "local-v1", path.name, path.read_bytes())
+            # Фрагменты короче 40 символов (колонтитулы, обрывки) фактов не несут — отсеиваются
             fragments = [f for f in fragments if len((f.text or "").strip()) >= 40][: args.max_fragments]
             if not fragments:
                 print("нет текстовых фрагментов (скан? пустой?)")

@@ -1,13 +1,13 @@
 """Бесплатные научные API без ключей: arXiv, Crossref, Semantic Scholar (зона ML-A).
 
 Дополняют ddgs-поиск в web_search: каждый источник опрашивается асинхронно
-и изолированно — сбой или таймаут одного не роняет остальные (пустой список
-и warning в лог). Результаты приводятся к формату К3 {title, url, snippet}
+и изолированно — сбой или таймаут одного не прерывает работу остальных
+(пустой список и warning в лог). Результаты приводятся к формату К3 {title, url, snippet}
 с полем source для отладки.
 
-Про язык: API англоязычны, а вопросы часто на русском — выдача для кириллицы
-будет бедной, это ожидаемо. Перевод запросов вне зоны задачи; фильтрацию по
-релевантности выполняет LLM-суммаризатор на следующем шаге.
+Язык запросов: API англоязычны — web_search передаёт сюда английский перевод
+вопроса (офлайн-argos, см. translate.py). Нерелевантную часть выдачи отсекает
+семантический фильтр bge-m3 в answer_from_web.
 """
 import asyncio
 import logging
@@ -18,7 +18,7 @@ import httpx
 
 log = logging.getLogger(__name__)
 
-# Единый бюджет на источник: медленный API отваливается сам, не задерживая ответ
+# Единый бюджет на источник: медленный API исключается по таймауту, не задерживая ответ
 SOURCE_TIMEOUT = 6.0
 RESULTS_PER_SOURCE = 5
 
@@ -47,8 +47,8 @@ def _year(value) -> int | None:
     """Год издания из разнородных значений API → int | None.
 
     Принимает int, ISO-дату/строку с годом ("2024-01-01T00:00:00Z", "2024") или
-    None. Разумный диапазон (1500..2100) отсекает мусор; всё прочее — None,
-    отсутствие года не должно ронять парсинг источника.
+    None. Допустимый диапазон (1500..2100) отсекает некорректные значения; всё
+    прочее — None, отсутствие года не должно прерывать парсинг источника.
     """
     if value is None:
         return None
@@ -105,7 +105,7 @@ async def _search_crossref(client: httpx.AsyncClient, query: str) -> list[dict]:
             _CROSSREF_URL,
             params={
                 "query": query, "rows": RESULTS_PER_SOURCE,
-                "select": "title,URL,abstract,author,container-title,published,issued",
+                "select": "title,URL,abstract,container-title,published,issued",
             },
             headers={"User-Agent": _CROSSREF_UA},
         )
@@ -133,7 +133,7 @@ async def _search_crossref(client: httpx.AsyncClient, query: str) -> list[dict]:
 
 
 async def _search_semanticscholar(client: httpx.AsyncClient, query: str) -> list[dict]:
-    """Semantic Scholar Graph API без ключа (низкий лимит): 429 → [] без ретрая."""
+    """Semantic Scholar Graph API без ключа (низкий лимит): 429 → [] без повтора."""
     try:
         resp = await client.get(_S2_URL, params={
             "query": query, "limit": RESULTS_PER_SOURCE, "fields": "title,abstract,url,year",
@@ -160,20 +160,28 @@ async def _search_semanticscholar(client: httpx.AsyncClient, query: str) -> list
         return []
 
 
-async def search_scientific(query: str) -> list[dict]:
-    """Параллельный опрос трёх API → [{title, url, snippet, source}].
+async def search_scientific(query: str, enabled: set[str] | None = None) -> list[dict]:
+    """Параллельный опрос научных API → [{title, url, snippet, source}].
 
-    Каждый источник глушит свои ошибки сам (лог warning, []);
+    enabled — имена включённых API ({"arxiv", "crossref", "semanticscholar"}),
+    None = все три (по умолчанию); пустой набор — опрос пропускается целиком.
+    Каждый источник перехватывает собственные ошибки (лог warning, []);
     return_exceptions=True — вторая линия защиты от неожиданных сбоев.
     """
     query = (query or "").strip()
     if not query:
         return []
+    searchers = {
+        "arxiv": _search_arxiv,
+        "crossref": _search_crossref,
+        "semanticscholar": _search_semanticscholar,
+    }
+    active = [fn for name, fn in searchers.items() if enabled is None or name in enabled]
+    if not active:
+        return []
     async with _make_client() as client:
         parts = await asyncio.gather(
-            _search_arxiv(client, query),
-            _search_crossref(client, query),
-            _search_semanticscholar(client, query),
+            *(fn(client, query) for fn in active),
             return_exceptions=True,
         )
     results: list[dict] = []

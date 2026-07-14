@@ -14,8 +14,8 @@ _EFFECT_DIRECTIONS = {"increase", "decrease", "neutral", "unknown"}
 
 
 # Отказы провайдера, при которых продолжать батч бессмысленно: остальные
-# фрагменты упадут так же, а backend должен пометить документ failed (HTTP 502),
-# а не completed с молча потерянными фактами
+# фрагменты завершатся той же ошибкой, а backend должен пометить документ failed
+# (HTTP 502), а не completed с фактами, потерянными без уведомления
 _FATAL_KINDS = {"auth", "quota", "unavailable"}
 
 
@@ -28,8 +28,8 @@ async def extract_fragments(fragments: list[SourceFragment]) -> list[ExtractionC
         if isinstance(result, yandex_client.YandexClientError) and result.kind in _FATAL_KINDS:
             raise result
         if isinstance(result, BaseException):
-            # локальная проблема фрагмента (кривой JSON, мусорный ответ модели)
-            # изолируется и логируется, батч продолжается
+            # локальная проблема фрагмента (невалидный JSON, некорректный ответ
+            # модели) изолируется и логируется, батч продолжается
             log.warning("Фрагмент %s пропущен: %s", fragment.id, result)
             continue
         candidates.extend(result)
@@ -40,7 +40,7 @@ _DIGIT_RE = re.compile(r"\d")
 
 
 def _route(fragment: SourceFragment, text: str, image_b64: str | None) -> str:
-    """Пред-фильтр-маршрутизатор (из итогового плана): каким разбором обрабатывать фрагмент.
+    """Предварительный маршрутизатор: определяет, каким разбором обрабатывать фрагмент.
 
     vision — сканы и схемы; full — таблицы и текст с числами (нужны числовые правила
     и словарь терминов); light — простой текст, промпт короче в ~4 раза.

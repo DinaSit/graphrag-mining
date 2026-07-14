@@ -15,7 +15,7 @@ from app import config
 _TEMPLATES = {
     # Полный разбор: числа, таблицы, сканы — с числовыми правилами и словарём терминов
     "full": Path(__file__).parent / "prompts" / "extraction.md",
-    # Облегчённый разбор: простой текст без чисел — короче в ~4 раза (пред-фильтр из плана)
+    # Облегчённый разбор: простой текст без чисел — промпт короче в ~4 раза
     "light": Path(__file__).parent / "prompts" / "extraction_light.md",
 }
 
@@ -30,7 +30,7 @@ def _static_prompt(mode: str = "full") -> str:
     ontology = yaml.safe_load((config.DOMAIN_DIR / "ontology.yaml").read_text(encoding="utf-8"))
 
     if mode == "light":
-        # Простому тексту хватает перечня имён — без описаний, примеров и словаря
+        # Для простого текста достаточно перечня имён — без описаний, примеров и словаря
         entity_lines = [", ".join(ontology.get("entity_types", {}))]
         relation_lines = [", ".join(ontology.get("relation_types", {}))]
     else:

@@ -65,13 +65,13 @@ async def chat_json(messages: list[dict], model: str | None = None) -> dict:
 async def chat_stream(messages: list[dict], model: str | None = None):
     """Стриминговый аналог chat_json (POST /chat_stream сервиса ml-extraction).
 
-    Асинхронный генератор: yield'ит {"delta": "<кусок текста>"} по мере
+    Асинхронный генератор: выдаёт {"delta": "<порция текста>"} по мере
     генерации; последним ВСЕГДА идёт терминальное событие
     {"done": True, "text": "<весь накопленный текст>",
      "error": LLMUnavailableError | None} — исключения наружу не
     выбрасываются, чтобы SSE-обработчик /ask/stream гарантированно
     отправил финальное событие. Ошибки протокола (detail с kind)
-    маппятся в LLMUnavailableError так же, как в chat_json.
+    преобразуются в LLMUnavailableError так же, как в chat_json.
     """
     url = LLM_CHAT_URL.replace("/chat_json", "/chat_stream")
     accumulated: list[str] = []
@@ -90,7 +90,7 @@ async def chat_stream(messages: list[dict], model: str | None = None):
                 async for chunk in response.aiter_text():
                     buffer += chunk
                     # SSE-события разделяются пустой строкой; событие может
-                    # прийти разрезанным между чанками — копим буфер
+                    # быть разделено между порциями — данные накапливаются в буфере
                     while "\n\n" in buffer:
                         raw_event, buffer = buffer.split("\n\n", 1)
                         for line in raw_event.splitlines():
@@ -129,15 +129,15 @@ _STRING_ESCAPES = {'"': '"', "\\": "\\", "/": "/", "n": "\n", "t": "\t", "r": "\
 
 
 class SummaryStreamExtractor:
-    """Конечный автомат: вытаскивает значение ключа "summary" из ПОТОКА
+    """Конечный автомат: извлекает значение ключа "summary" из ПОТОКА
     сырого JSON-текста модели, не дожидаясь конца генерации.
 
     Модель отвечает JSON, где "summary" — первый ключ (ANSWER_SYSTEM_PROMPT),
     поэтому его значение можно отдавать пользователю по мере прихода дельт.
     feed(chunk) возвращает очередную порцию ДЕКОДИРОВАННОГО текста summary
     (экранирование \\", \\n, \\uXXXX и суррогатные пары разворачиваются);
-    после закрывающей кавычки хвост JSON молча проглатывается. Поток без
-    ключа "summary" не даёт наружу ничего.
+    после закрывающей кавычки остаток JSON игнорируется. Поток без
+    ключа "summary" не порождает вывода.
     """
 
     _KEY = '"summary"'
@@ -175,7 +175,7 @@ class SummaryStreamExtractor:
                 self._tail = ""
         elif self._state == "in_string":
             self._string_char(ch, out)
-        # state == "done": остаток JSON копится у вызывающего, наружу — ничего
+        # state == "done": остаток JSON накапливается у вызывающего, вывод не производится
 
     def _string_char(self, ch: str, out: list[str]) -> None:
         if self._unicode is not None:

@@ -20,3 +20,6 @@ tests/
 # локальные настройки Claude Code / IDE-сессий — машиноспецифичны
 .claude/
 .DS_Store
+
+# pdf.js ставится при сборке образа (backend/Dockerfile), в репо не хранится
+backend/ui/pdfjs/

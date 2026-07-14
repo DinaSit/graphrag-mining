@@ -10,6 +10,9 @@ services:
       - "5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
+      # Схема применяется однократно, при первом создании тома (механика
+      # docker-entrypoint-initdb.d); дальнейшие миграции выполняет ensure_schema
+      # при старте backend (backend/app/persistence.py)
       - ./backend/migrations/001_init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U graphrag -d graphrag"]
@@ -49,6 +52,9 @@ services:
     volumes:
       - minio-data:/data
 
+  # Одноразовый контейнер: until-цикл ждёт готовности MinIO (заменяет ему
+  # healthcheck) и создаёт бакет; --ignore-existing делает повторный запуск
+  # идемпотентным. Backend дожидается его через service_completed_successfully.
   minio-init:
     image: minio/mc:latest
     depends_on:
@@ -60,6 +66,9 @@ services:
       mc mb --ignore-existing local/graphrag-documents
       "
 
+  # Мок сервиса извлечения входит в образ backend (код — backend/app/ml_mock.py),
+  # отдельный образ не собирается. Свой healthcheck обязателен: HEALTHCHECK
+  # образа опрашивает порт 8000, а мок слушает 8001.
   ml-mock:
     restart: unless-stopped
     build:
@@ -105,7 +114,7 @@ services:
       PYTHONPATH: /app/backend
     volumes:
       # Та же доменная конфигурация, что у ml-extraction: правки synonyms.csv и
-      # validation-rules.yaml подхватываются рестартом, без пересборки образа
+      # validation-rules.yaml применяются после перезапуска, без пересборки образа
       - ./domain:/app/domain:ro
     ports:
       - "8000:8000"
@@ -120,6 +129,9 @@ services:
         condition: service_completed_successfully
       ml-mock:
         condition: service_healthy
+    # Повторяет HEALTHCHECK образа с теми же параметрами, но добавляет
+    # start_period: неуспешные проверки в первые 10 с после старта
+    # не учитываются в счётчике retries
     healthcheck:
       test:
         [

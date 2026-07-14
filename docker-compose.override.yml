@@ -15,8 +15,8 @@ services:
     build:
       context: ml_extraction
     environment:
-      # Пустой ключ не валит интерполяцию compose (":?": стек не стартовал бы целиком,
-      # включая postgres) — без ключа стек поднимается, а извлечение отвечает явной
+      # Пустой ключ не прерывает интерполяцию compose (":?": стек не стартовал бы целиком,
+      # включая postgres) — без ключа стек запускается, а извлечение отвечает явной
       # ошибкой авторизации: документ помечается failed с понятной причиной
       YANDEX_API_KEY: ${YANDEX_API_KEY:-}
       YANDEX_FOLDER_ID: ${YANDEX_FOLDER_ID:-}
@@ -30,14 +30,18 @@ services:
       # Ключ запасного LLM; локальному Ollama не нужен — оставить пустым
       FALLBACK_API_KEY: ${FALLBACK_API_KEY:-}
       DOMAIN_DIR: /domain/default
-      # Квота чата держит 4 параллельных запроса (ретраи с паузами настроены)
+      # Квота чата допускает 4 параллельных запроса (повторы с паузами настроены)
       LLM_CONCURRENCY: "4"
       LLM_RETRIES: ${LLM_RETRIES:-6}
+      # Бюджеты веб-контура. Контур асинхронный (UI ждёт его параллельно,
+      # показывая скелет), поэтому LLM-каскаду Яндекс→запасной даётся
+      # полноценное окно: облачному резервному провайдеру нужны десятки секунд.
+      # Правило цепочки: WEB_ANSWER_TIMEOUT (backend) = поиск + LLM + запас.
       WEB_SEARCH_TIMEOUT: ${WEB_SEARCH_TIMEOUT:-8}
-      WEB_LLM_TIMEOUT: ${WEB_LLM_TIMEOUT:-6}
+      WEB_LLM_TIMEOUT: ${WEB_LLM_TIMEOUT:-45}
     volumes:
       - ./domain:/domain:ro
-      # Кэш весов bge-m3 (~2.3 ГБ): скачиваются один раз, переживают пересборки
+      # Кэш весов bge-m3 (~2.3 ГБ): скачиваются один раз, сохраняются при пересборках
       - hf-cache:/root/.cache/huggingface
     ports:
       - "8002:8002"
@@ -69,9 +73,12 @@ services:
       # Веб-поиск по внешним источникам, когда база знаний не дала ответа.
       # Убрать переменную — ступень отключится.
       WEB_ANSWER_URL: http://ml-extraction:8002/web_answer
-      WEB_ANSWER_TIMEOUT: ${WEB_ANSWER_TIMEOUT:-20}
+      # Внешний бюджет контура = поиск + LLM + запас:
+      # WEB_SEARCH_TIMEOUT (8) + WEB_LLM_TIMEOUT (45) + запас на научные API
+      # и сетевые накладные. Прокси backend добавляет поверх ещё +5 c.
+      WEB_ANSWER_TIMEOUT: ${WEB_ANSWER_TIMEOUT:-75}
     # !override заменяет базовый список целиком: зависимость от ml-mock снята,
-    # backend стартует даже при неподнявшемся mock-контейнере
+    # backend стартует даже при незапущенном mock-контейнере
     depends_on: !override
       postgres:
         condition: service_healthy

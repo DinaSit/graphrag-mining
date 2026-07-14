@@ -2,7 +2,7 @@
 
 Загрузка выполняется вне HTTP-запроса: API отвечает сразу, статусы задач
 пишутся в таблицу jobs. Число воркеров ограничивает параллельную обработку
-документов; суммарный лимит LLM-вызовов держит сервис извлечения.
+документов; суммарный лимит LLM-вызовов обеспечивает сервис извлечения.
 """
 from __future__ import annotations
 
@@ -38,6 +38,11 @@ class IngestQueue:
             "access_level": access_level,
         })
 
+    def enqueue_reprocess(self, document_id: str) -> str:
+        """Повторная обработка документа через LLM — в общей очереди: число
+        воркеров ограничивает параллельные LLM-вызовы так же, как для инжеста."""
+        return self._enqueue({"kind": "reprocess", "document_id": document_id})
+
     def get_job(self, job_id: str) -> dict | None:
         with self._jobs_lock:
             job = self.jobs.get(job_id)
@@ -56,10 +61,14 @@ class IngestQueue:
             job_id = task["job_id"]
             try:
                 self._record(job_id, task, "processing")
-                self.store.ingest_document(
-                    task["filename"], task["content"], task["document_type"],
-                    task["source_label"], task["access_level"],
-                )
+                if task["kind"] == "reprocess":
+                    self.store.reprocess_document(task["document_id"])
+                    self.store.refresh_document_traits(task["document_id"])
+                else:
+                    self.store.ingest_document(
+                        task["filename"], task["content"], task["document_type"],
+                        task["source_label"], task["access_level"],
+                    )
                 self._record(job_id, task, "completed")
             except Exception as exc:
                 log.exception("Фоновая задача %s (%s) упала", job_id, task["kind"])
@@ -76,5 +85,5 @@ class IngestQueue:
                 self.store.postgres_sink.upsert_job(job_id, task["kind"], status, payload, error)
             except Exception:
                 # Статус в памяти остаётся источником: недоступность PG
-                # не должна ронять воркер и терять саму задачу
+                # не должна прерывать воркер и приводить к потере задачи
                 log.exception("Статус job %s не сохранён в PostgreSQL", job_id)

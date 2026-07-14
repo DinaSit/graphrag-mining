@@ -1,3 +1,6 @@
+-- Выполняется однократно при первой инициализации тома PostgreSQL
+-- (docker-entrypoint-initdb.d); дальнейшую эволюцию схемы на живой базе
+-- выполняет ensure_schema при старте backend (backend/app/persistence.py).
 CREATE EXTENSION IF NOT EXISTS vector;
 
 CREATE TABLE IF NOT EXISTS documents (
@@ -22,14 +25,6 @@ CREATE TABLE IF NOT EXISTS documents (
     -- Год издания из текста документа; NULL — ещё не вычислен/не найден
     year INTEGER
 );
-
-ALTER TABLE documents ADD COLUMN IF NOT EXISTS storage_bucket VARCHAR(256);
-ALTER TABLE documents ADD COLUMN IF NOT EXISTS storage_object VARCHAR(1024);
-ALTER TABLE documents ADD COLUMN IF NOT EXISTS storage_uri VARCHAR(1400);
-ALTER TABLE documents ADD COLUMN IF NOT EXISTS hidden BOOLEAN NOT NULL DEFAULT FALSE;
-ALTER TABLE documents ADD COLUMN IF NOT EXISTS is_scientific BOOLEAN;
-ALTER TABLE documents ADD COLUMN IF NOT EXISTS origin TEXT;
-ALTER TABLE documents ADD COLUMN IF NOT EXISTS year INTEGER;
 
 CREATE TABLE IF NOT EXISTS document_versions (
     id VARCHAR(64) PRIMARY KEY,

@@ -12,7 +12,7 @@ from uuid import uuid4
 
 from app.file_storage import PREVIEW_SUFFIX, MinioFileStorage
 from app.persistence import Neo4jSink, PostgresSink
-from app.pipeline.document_traits import classify_document, extract_publication_year
+from app.pipeline.document_traits import classify_document_llm, detect_origin, extract_publication_year
 from app.pipeline.normalization import (
     JUNK_VALUES,
     DomainNormalizer,
@@ -20,6 +20,7 @@ from app.pipeline.normalization import (
     clean_extracted,
     direction_label,
     float_or_none,
+    normalize_effect_direction,
     slug,
 )
 from app.pipeline.office_render import convert_office_to_pdf
@@ -41,7 +42,6 @@ from app.schemas import (
     GraphEdge,
     GraphNode,
     GraphPayload,
-    OntologyCandidate,
     SearchHit,
     SourceRef,
     SourceFragment,
@@ -78,7 +78,7 @@ class ApplicationStore:
         self.domain_dir = domain_dir
         self.normalizer = DomainNormalizer(domain_dir)
         # Пороги кандидатов и диапазоны правдоподобия — из validation-rules.yaml
-        # (владелец — инженер знаний); дефолты сохраняют прежнее поведение
+        # (владелец — инженер знаний); значения по умолчанию сохраняют прежнее поведение
         self.validation_rules = load_validation_rules(domain_dir)
         thresholds = self.validation_rules.get("thresholds", {})
         self.auto_approve_threshold = float(thresholds.get("auto_approve", AUTO_APPROVE_THRESHOLD))
@@ -97,14 +97,13 @@ class ApplicationStore:
         self.fragments: dict[str, SourceFragment] = {}
         self.candidates: dict[str, ExtractionCandidate] = {}
         self.facts: dict[str, Fact] = {}
-        self.ontology_candidates: dict[str, OntologyCandidate] = {}
         self.fragment_vectors: dict[str, list[float]] = {}
         # Дедуп по checksum: проверка и регистрация документа атомарны,
         # иначе два ingest-воркера создают дубликаты одного файла
         self._ingest_lock = threading.Lock()
         # Документы, удаление которых уже началось: reprocess и toggle видимости
-        # сверяются с этим набором под тем же локом, иначе записи, пришедшие во
-        # время удаления, ре-INSERT-ят документ-призрак в PG/Neo4j
+        # сверяются с этим набором под тем же локом, иначе записи, выполненные
+        # во время удаления, повторно вставляют удалённый документ в PG/Neo4j
         self._deleting: set[str] = set()
 
     def hydrate_from_postgres(self) -> None:
@@ -118,9 +117,8 @@ class ApplicationStore:
         self.candidates.update(state["candidates"])
         self.facts.update(state["facts"])
         self.fragment_vectors.update(state["vectors"])
-        self.ontology_candidates.update(state.get("ontology_candidates", {}))
-        # Признаки документов, загруженных до появления эвристики, дочитываются
-        # синхронно: счёт по фрагментам в памяти, объём — единицы документов.
+        # Признаки документов, загруженных до появления эвристики, дополняются
+        # синхронно: расчёт по фрагментам в памяти, объём — единицы документов.
         # Группировка фрагментов по документу делается один раз на оба бэкфила,
         # а не полным сканом стора на каждый документ
         fragments_by_document = self._fragments_by_document()
@@ -128,9 +126,21 @@ class ApplicationStore:
         # Год издания — отдельным проходом: документ мог получить is_scientific
         # до появления поля year, поэтому бэкфил года не совмещён с traits
         self._backfill_document_years(fragments_by_document)
-        # Мусорные значения ('не указано', 'unknown'…) в старых фактах чистятся
-        # у источника единожды при старте (идемпотентно)
+        # Значения-заглушки ('не указано', 'unknown'…) в ранее сохранённых фактах
+        # очищаются в хранимых полях единожды при старте (идемпотентно)
         self._backfill_junk_facts()
+        # Вердикты прежней маркерной эвристики научности аннулируются: научность
+        # определяет LLM с обоснованием (doc_type=None — признак необходимости
+        # доклассификации), до её ответа значение остаётся пустым (прочерк)
+        self._void_legacy_scientific()
+        # Тип и научность (LLM по титульнику) — в фоне: вызовы медленные,
+        # старт не блокируется; документы без вердикта дооцениваются здесь же
+        # при каждом старте, пока LLM не ответит
+        if any(document.doc_type is None for document in self.documents.values()):
+            threading.Thread(
+                target=self._classify_documents_llm, args=(fragments_by_document,),
+                daemon=True, name="classify-docs",
+            ).start()
         # Фрагменты без векторов (например, после смены модели эмбеддингов)
         # индексируются заново в фоне: старт backend не блокируется
         missing = [fragment for fid, fragment in self.fragments.items() if fid not in self.fragment_vectors]
@@ -161,76 +171,143 @@ class ApplicationStore:
             fragments.sort(key=lambda fragment: (fragment.page, fragment.id))
         return grouped
 
+    def fragments_of(self, document_id: str) -> list[SourceFragment]:
+        """Все фрагменты одного документа в порядке (page, id) — как в
+        _fragments_by_document: порядок из PG/дикта не гарантирован."""
+        fragments = [f for f in list(self.fragments.values()) if f.document_id == document_id]
+        fragments.sort(key=lambda f: (f.page, f.id))
+        return fragments
+
+    def _persist_current(self, document: DocumentRecord) -> None:
+        """Персист документа вместе с его текущей версией; версии нет в сторе —
+        тихий пропуск (писать документ без версии некуда)."""
+        version = self.versions.get(document.current_version_id)
+        if version is not None:
+            self._persist_document(document, version)
+
+    def _persist_document_quiet(self, document: DocumentRecord) -> None:
+        """Персист документа, не прерывающий вызывающий код (бэкфилы, фоновые
+        потоки): признаки справочные, сбой записи фиксируется в логе, попытка
+        повторится при следующем старте."""
+        try:
+            self._persist_current(document)
+        except Exception:
+            log.exception("Не удалось сохранить документ %s", document.id)
+
+    def _apply_traits(self, document: DocumentRecord, fragments: list[SourceFragment]) -> bool:
+        """Пересчитывает признаки документа: происхождение и год (эвристики) +
+        тип/научность/обоснование (LLM). Возвращает True, если LLM дала вердикт;
+        при недоступной LLM прежние тип/научность не затираются."""
+        document.origin = detect_origin(fragments)
+        document.year = extract_publication_year(fragments, document.filename)
+        traits = classify_document_llm(fragments, document.filename)
+        if traits is None:
+            return False
+        document.doc_type = traits["doc_type"]
+        document.is_scientific = traits["is_scientific"]
+        document.trait_reason = traits["trait_reason"]
+        return True
+
     def _backfill_document_traits(self, fragments_by_document: dict[str, list[SourceFragment]] | None = None) -> None:
-        """Вычисляет is_scientific/origin документам, у которых признаков ещё нет."""
+        """Проставляет origin (эвристика по языку) документам без признака."""
         if fragments_by_document is None:
             fragments_by_document = self._fragments_by_document()
         for document in list(self.documents.values()):
-            if document.is_scientific is not None:
+            if document.origin is not None:
                 continue
             fragments = fragments_by_document.get(document.id)
             if not fragments:
                 continue
-            document.is_scientific, document.origin = classify_document(fragments)
-            version = self.versions.get(document.current_version_id)
-            if version is not None:
-                try:
-                    self._persist_document(document, version)
-                except Exception:
-                    # Признаки справочные: сбой записи не должен ронять старт,
-                    # бэкфил повторится при следующем запуске
-                    log.exception("Не удалось сохранить признаки документа %s", document.id)
+            document.origin = detect_origin(fragments)
+            self._persist_document_quiet(document)
+
+    def _void_legacy_scientific(self) -> None:
+        """Сбрасывает is_scientific, посчитанный старой маркерной эвристикой.
+
+        Документ с doc_type=None ещё не проходил LLM-классификацию — его
+        научность из прежней эвристики (без обоснования) недействительна.
+        Идемпотентно: после сброса is_scientific уже None, после классификации
+        doc_type задан — повторный старт ничего не трогает.
+        TODO: удалить после первого прод-запуска — для новых данных
+        предусловие не возникает, блок станет мёртвым грузом.
+        """
+        for document in list(self.documents.values()):
+            if document.doc_type is not None or document.is_scientific is None:
+                continue
+            document.is_scientific = None
+            self._persist_document_quiet(document)
+
+    def _classify_documents_llm(self, fragments_by_document: dict[str, list[SourceFragment]]) -> None:
+        """Фоновая LLM-классификация (тип + научность) документов без вердикта.
+
+        Работает в отдельном потоке: LLM-вызовы медленные, старт backend не
+        блокируется. Идемпотентно — классифицированный документ пропускается;
+        недоступная LLM оставляет None (прочерк в UI), попытка повторится
+        при следующем старте. Два отказа LLM подряд останавливают обход:
+        при недоступном каскаде повторные вызовы лишь расходуют таймауты
+        на весь корпус.
+        """
+        pending = [d for d in list(self.documents.values()) if d.doc_type is None]
+        done = 0
+        misses = 0
+        for document in pending:
+            fragments = fragments_by_document.get(document.id)
+            if not fragments:
+                continue
+            if self._apply_traits(document, fragments):
+                self._persist_document_quiet(document)
+                done += 1
+                misses = 0
+            else:
+                misses += 1
+                if misses >= 2:
+                    log.warning("Классификация документов остановлена: LLM недоступна, "
+                                "продолжим при следующем старте")
+                    break
+        if pending:
+            log.info("Классификация документов: %d/%d получили тип и научность", done, len(pending))
 
     def _backfill_document_years(self, fragments_by_document: dict[str, list[SourceFragment]] | None = None) -> None:
-        """Проставляет year документам, у которых он ещё не вычислен (None).
+        """Пересчитывает year ВСЕХ документов по актуальной эвристике
+        (extract_publication_year: имя файла имеет приоритет над текстом,
+        зона поиска в тексте — первые две страницы).
 
-        Идемпотентно: документ с уже известным годом пропускается, повторный
-        старт ничего не пишет. Год из документа без найденного года останется
-        None и будет пересчитываться при каждом старте — это дёшево (единицы
-        документов, счёт по фрагментам в памяти) и позволяет подхватить год,
-        если эвристику позже улучшат.
+        Год записывается только этой эвристикой (ручного ввода нет), поэтому
+        полный пересчёт на старте безопасен и поддерживает таблицу документов
+        в соответствии с текущей версией правила. Операция незатратна: расчёт
+        по фрагментам в памяти; запись в БД — только для документов, у которых
+        значение изменилось.
         """
         if fragments_by_document is None:
             fragments_by_document = self._fragments_by_document()
-        filled = 0
+        changed = 0
         for document in list(self.documents.values()):
-            if document.year is not None:
-                continue
-            fragments = fragments_by_document.get(document.id)
-            if not fragments:
-                continue
+            fragments = fragments_by_document.get(document.id) or []
             year = extract_publication_year(fragments, document.filename)
-            if year is None:
+            if year == document.year:
                 continue
             document.year = year
-            version = self.versions.get(document.current_version_id)
-            if version is not None:
-                try:
-                    self._persist_document(document, version)
-                except Exception:
-                    # Год справочный: сбой записи не роняет старт, повторится
-                    log.exception("Не удалось сохранить год документа %s", document.id)
-            filled += 1
-        if filled:
-            log.info("backfill: год издания проставлен %d документам", filled)
+            self._persist_document_quiet(document)
+            changed += 1
+        if changed:
+            log.info("backfill: год издания пересчитан у %d документов", changed)
 
     def _backfill_junk_facts(self) -> None:
-        """Чистит мусорные значения текстовых полей существующих фактов до ''
-        (единый clean_extracted) и персистит. Идемпотентно: уже чистое поле
-        не меняется, так что повторный старт не пишет ничего."""
+        """Очищает значения-заглушки текстовых полей существующих фактов до ''
+        (единый clean_extracted) и персистит. Идемпотентно: уже очищенное поле
+        не меняется. NB: upsert_fact при конфликте не обновляет текстовые
+        колонки, поэтому в PG значения-заглушки сохраняются и после рестарта
+        очистка выполняется заново."""
         cleaned = 0
         for fact in list(self.facts.values()):
             updates: dict[str, Any] = {}
-            for field in ("material", "process", "sample", "lab", "team"):
+            for field in ("material", "process", "sample", "lab", "team", "property"):
                 value = getattr(fact, field)
                 new_value = clean_extracted(value)
                 if new_value != value:
                     updates[field] = new_value
-            property_clean = clean_extracted(fact.property)
-            if property_clean != fact.property:
-                updates["property"] = property_clean
-            # effect_direction 'unknown'/мусор → '' (в подписи такого направления не бывает)
-            if _normalize_effect_direction(fact.effect_direction) == "unknown" and fact.effect_direction != "":
+            # effect_direction 'unknown'/значение-заглушка → '' (такое направление в подпись не выводится)
+            if normalize_effect_direction(fact.effect_direction) == "unknown" and fact.effect_direction != "":
                 updates["effect_direction"] = ""
             equipment_clean = clean_extracted(fact.equipment) or None
             if equipment_clean != fact.equipment:
@@ -244,7 +321,7 @@ class ApplicationStore:
             try:
                 self._persist_fact(updated)
             except Exception:
-                # Гигиена справочная: сбой записи не роняет старт, повторится
+                # Гигиена справочная: сбой записи не прерывает старт, попытка повторится
                 log.exception("Не удалось сохранить очищенный факт %s", fact.id)
             cleaned += 1
         if cleaned:
@@ -258,11 +335,11 @@ class ApplicationStore:
             log.exception("hydrate: переиндексация %d фрагментов не удалась", len(fragments))
 
     def _make_preview(self, document: DocumentRecord, content: bytes) -> None:
-        """Строит PDF-превью DOCX/PPTX (LibreOffice) и кладёт его в MinIO рядом
+        """Строит PDF-превью DOCX/PPTX (LibreOffice) и сохраняет его в MinIO рядом
         с оригиналом (<storage_object>.preview.pdf), проставляя preview_object.
 
-        Превью необязательно: сбой конвертации или недоступный MinIO не бросают —
-        preview_object просто остаётся None (лог пишут convert/put_preview).
+        Превью необязательно: сбой конвертации или недоступный MinIO не приводят
+        к исключению — preview_object остаётся None (лог пишут convert/put_preview).
         """
         if not (self.file_storage and self.file_storage.enabled and document.storage_object):
             return
@@ -278,7 +355,7 @@ class ApplicationStore:
 
     def _backfill_previews(self, documents: list[DocumentRecord]) -> None:
         """Фоновый бэкфил PDF-превью для существующих DOCX/PPTX: скачать оригинал
-        из MinIO, сконвертировать, положить превью, персистнуть preview_object.
+        из MinIO, сконвертировать, сохранить превью, персистнуть preview_object.
         Ошибки по одному документу логируются и не прерывают остальные."""
         built = 0
         for document in documents:
@@ -290,9 +367,7 @@ class ApplicationStore:
                 self._make_preview(document, original)
                 if document.preview_object is None:
                     continue
-                version = self.versions.get(document.current_version_id)
-                if version is not None:
-                    self._persist_document(document, version)
+                self._persist_current(document)
                 built += 1
             except Exception:
                 log.exception("backfill: PDF-превью документа %s не создано", document.id)
@@ -321,16 +396,15 @@ class ApplicationStore:
     def set_document_visibility(self, document_id: str, hidden: bool) -> DocumentRecord:
         """Скрывает/показывает документ. Данные не удаляются, Neo4j не перестраивается."""
         # Проверка и persist атомарны под общим с delete_document локом
-        # (по образцу reprocess_document): toggle, догнавший удаление, не должен
-        # ре-INSERT-ить строку только что удалённого документа в PG
+        # (по образцу reprocess_document): переключение видимости, выполненное
+        # во время удаления, не должно повторно вставлять строку только что
+        # удалённого документа в PG
         with self._ingest_lock:
             if not self._document_alive(document_id):
                 raise KeyError(document_id)
             document = self.documents[document_id]
             document.hidden = hidden
-            version = self.versions.get(document.current_version_id)
-            if version is not None:
-                self._persist_document(document, version)
+            self._persist_current(document)
         return document
 
     def random_visible_fact(self) -> Fact | None:
@@ -338,7 +412,7 @@ class ApplicationStore:
         pool = [fact for fact in self.visible_facts() if fact.status == "approved"]
         if not pool:
             return None
-        # random.choice допустим: интерактивная фича UI, не workflow-скрипт
+        # random.choice допустим: интерактивная функция UI, не workflow-скрипт
         return random.choice(pool)
 
     def delete_document(self, document_id: str) -> dict:
@@ -350,9 +424,9 @@ class ApplicationStore:
             document = self.documents.get(document_id)
             if document is None or document_id in self._deleting:
                 raise KeyError(document_id)
-            # Тумбстоун ставится до чистки внешних хранилищ: reprocess под тем же
-            # локом видит его и отбрасывает результаты извлечения, а не ре-INSERT-ит
-            # только что удалённые строки
+            # Маркер удаления ставится до очистки внешних хранилищ: reprocess
+            # под тем же локом видит его и отбрасывает результаты извлечения,
+            # а не вставляет повторно только что удалённые строки
             self._deleting.add(document_id)
 
         try:
@@ -384,7 +458,7 @@ class ApplicationStore:
         finally:
             self._deleting.discard(document_id)
 
-        # Снять пометку спора у оппонентов удалённых фактов
+        # Снять пометку противоречия у фактов, конфликтовавших с удалёнными
         removed = set(fact_ids)
         for fact in list(self.facts.values()):
             if removed & set(fact.conflicts_with):
@@ -459,7 +533,7 @@ class ApplicationStore:
             self._persist_document(document, version)
         except Exception as exc:
             # Второй backend-процесс мог записать тот же файл: UNIQUE(checksum)
-            # в PG — последний рубеж дедупа, возвращаем существующий документ
+            # в PG — итоговая гарантия дедупликации, возвращаем существующий документ
             existing = self._existing_on_unique_violation(exc, checksum, document_id, version_id)
             if existing:
                 return existing
@@ -486,10 +560,11 @@ class ApplicationStore:
                 self.add_candidate(candidate)
 
             self.index_fragments(fragments)
-            # Признаки документа считаются по готовым фрагментам один раз
-            document.is_scientific, document.origin = classify_document(fragments)
-            document.year = extract_publication_year(fragments, document.filename)
-            # PDF-превью DOCX/PPTX — после успешного парсинга; сбой не роняет
+            # Признаки документа считаются по готовым фрагментам один раз.
+            # Тип и научность — LLM по титульнику; недоступная LLM оставляет
+            # None (прочерк), фоновый бэкфил дооценит при следующем старте
+            self._apply_traits(document, fragments)
+            # PDF-превью DOCX/PPTX — после успешного парсинга; сбой не прерывает
             # инжест (preview_object останется None)
             self._make_preview(document, content)
             document.status = DocumentStatus.completed
@@ -568,7 +643,7 @@ class ApplicationStore:
                 raise KeyError(document_id)
             document = self.documents[document_id]
             version = self.versions[document.current_version_id]
-            fragments = [f for f in list(self.fragments.values()) if f.document_id == document_id]
+            fragments = self.fragments_of(document_id)
             document.status = version.status = DocumentStatus.processing
             document.element_count = len(fragments)
             self._persist_document(document, version)
@@ -578,7 +653,7 @@ class ApplicationStore:
             for candidate in candidates:
                 # Документ могли удалить, пока шло извлечение (окно — минуты):
                 # проверка и запись атомарны под общим с delete_document локом,
-                # иначе документ-призрак воскресает в PG/Neo4j
+                # иначе удалённый документ повторно появляется в PG/Neo4j
                 with self._ingest_lock:
                     if not self._document_alive(document_id):
                         return accepted
@@ -607,6 +682,19 @@ class ApplicationStore:
         """Документ существует и не находится в процессе удаления."""
         return document_id in self.documents and document_id not in self._deleting
 
+    def refresh_document_traits(self, document_id: str) -> None:
+        """Переоценка признаков документа по сохранённым фрагментам: происхождение
+        и год (эвристики) + тип/научность (LLM с обоснованием). Часть повторной
+        обработки; недоступная LLM оставляет прежние тип/научность."""
+        document = self.documents.get(document_id)
+        if document is None:
+            return
+        fragments = self.fragments_of(document_id)
+        if not fragments:
+            return
+        self._apply_traits(document, fragments)
+        self._persist_document_quiet(document)
+
     def approve_candidate(self, candidate_id: str) -> Fact:
         candidate = self.candidates[candidate_id]
         if candidate.source is None:
@@ -623,17 +711,17 @@ class ApplicationStore:
     def _mark_conflicts(self, fact: Fact) -> None:
         """Фиксирует противоречие: тот же материал и свойство, противоположный эффект.
 
-        Оба факта остаются в базе как есть — статус conflicting лишь помечает
-        зону разногласий и хранит ссылки на оппонентов (модель верификации из плана).
+        Оба факта остаются в базе без изменений — статус conflicting лишь
+        помечает противоречие и хранит ссылки на конфликтующие факты.
         """
-        fact_direction = _normalize_effect_direction(fact.effect_direction)
+        fact_direction = normalize_effect_direction(fact.effect_direction)
         opposite = {"increase": "decrease", "decrease": "increase"}.get(fact_direction)
         if opposite is None:
             return
         fact_key = self._fact_conflict_key(fact)
         # list(): факты добавляются из фоновых воркеров параллельно
         for other in list(self.facts.values()):
-            other_direction = _normalize_effect_direction(other.effect_direction)
+            other_direction = normalize_effect_direction(other.effect_direction)
             if (
                 self._fact_conflict_key(other) == fact_key
                 and other_direction == opposite
@@ -654,14 +742,14 @@ class ApplicationStore:
         """Переносит извлечённые сущности и связи онтологии из payload в Neo4j."""
         if not self.graph_sink:
             return
-        # Сущности с мусорными именами ('не указано', 'unknown'…) в граф не идут
+        # Сущности с именами-заглушками ('не указано', 'unknown'…) в граф не попадают
         entities = [
             {"type": item.get("type"), "name": clean_extracted(self.normalizer.normalize_entity(clean_extracted(item.get("name"))))}
             for item in candidate.payload.get("entities", [])
             if isinstance(item, dict)
         ]
         entities = [entity for entity in entities if entity["name"]]
-        # Ребро, чьё имя-конец мусорное, тоже не проецируется
+        # Ребро, у которого имя одного из концов — заглушка, также не проецируется
         relations = [
             {
                 "subject": clean_extracted(self.normalizer.normalize_entity(clean_extracted(item.get("subject")))),
@@ -683,7 +771,7 @@ class ApplicationStore:
         return candidate
 
     def index_fragments(self, fragments: list[SourceFragment]) -> None:
-        # Пачками: большой документ не влезает в таймаут одного запроса,
+        # Пачками: большой документ не укладывается в таймаут одного запроса,
         # а результат фиксируется по мере готовности, а не в конце.
         # 16 длинных фрагментов на CPU укладываются в таймаут с запасом
         for start in range(0, len(fragments), 16):
@@ -754,8 +842,8 @@ class ApplicationStore:
         node_ids: dict[tuple[str, str], str] = {}
 
         def node(node_type: str, label: str, **data: Any) -> str | None:
-            """Создаёт (или переиспользует) узел; мусорная подпись узла не рождает.
-            Возвращает id узла или None, если подпись мусорная."""
+            """Создаёт (или переиспользует) узел; для подписи-заглушки узел
+            не создаётся. Возвращает id узла или None, если подпись — заглушка."""
             if _is_junk_label(label):
                 return None
             key = (node_type, canonical_text(label))
@@ -763,7 +851,7 @@ class ApplicationStore:
             if existing is not None:
                 return existing
             base_id = f"{node_type.lower()}-{slug(label) or len(node_ids)}"
-            # Разные подписи, схлопнувшиеся в один slug, не должны делить id-узел
+            # Разные подписи с одинаковым slug не должны получать общий id узла
             node_id = base_id
             suffix = 2
             while node_id in nodes:
@@ -847,15 +935,16 @@ class ApplicationStore:
 
     def _fact_from_candidate(self, candidate: ExtractionCandidate) -> Fact:
         payload = candidate.payload
-        # Гигиена у источника: мусорные значения ('не указано', 'unknown'…)
-        # чистятся до '' единым clean_extracted, а не превращаются в дефолт-заглушку
+        # Гигиена у источника: значения-заглушки ('не указано', 'unknown'…)
+        # приводятся к '' единым clean_extracted, а не заменяются значением
+        # по умолчанию
         material = clean_extracted(self.normalizer.normalize_entity(clean_extracted(payload.get("material"))))
         property_name = clean_extracted(self.normalizer.normalize_entity(clean_extracted(payload.get("property"))))
         source = candidate.source
         if source is None:
             raise SourceRequiredError("Факт не может быть утвержден без ссылки на source fragment.")
         fact_id = f"claim-{candidate.id.replace('candidate-', '')}"
-        effect_direction = _normalize_effect_direction(payload.get("effect_direction"))
+        effect_direction = normalize_effect_direction(payload.get("effect_direction"))
         if effect_direction == "unknown":
             effect_direction = ""
         return Fact(
@@ -913,35 +1002,14 @@ def _candidate_quality_issues(payload: dict[str, Any]) -> list[str]:
 
 
 def _is_missing_value(value: Any) -> bool:
-    if value is None:
-        return True
-    text = str(value).strip().lower().replace("ё", "е")
-    return text in {"", "не указано", "unknown", "unknown material", "unknown property", "n/a", "none", "null"}
-
-
-def _normalize_effect_direction(value: Any) -> str:
-    text = str(value or "unknown").strip().lower().replace("ё", "е")
-    aliases = {
-        "increase": "increase",
-        "increased": "increase",
-        "рост": "increase",
-        "увеличение": "increase",
-        "повышение": "increase",
-        "decrease": "decrease",
-        "decreased": "decrease",
-        "снижение": "decrease",
-        "уменьшение": "decrease",
-        "падение": "decrease",
-        "neutral": "neutral",
-        "no_change": "neutral",
-        "без изменений": "neutral",
-        "нет изменений": "neutral",
-    }
-    return aliases.get(text, text or "unknown")
+    # Единый список значений-заглушек КГ (JUNK_VALUES через _is_junk_label):
+    # отдельный локальный набор расходится с общим, и значение «нет данных»
+    # проходит проверку качества кандидата
+    return value is None or _is_junk_label(str(value))
 
 
 def _is_junk_label(value: str | None) -> bool:
-    # Единый список мусорных подписей — JUNK_VALUES из normalization
+    # Единый список подписей-заглушек — JUNK_VALUES из normalization
     return str(value or "").strip().casefold().replace("ё", "е") in JUNK_VALUES
 
 
@@ -952,10 +1020,10 @@ def _effect_label(fact: Fact) -> str:
 
 def _claim_label(fact: Fact) -> str:
     """Короткая подпись узла Claim — суть утверждения: "<property>: <направление>";
-    без извлечённого направления — просто property (без висящего двоеточия);
+    без извлечённого направления — только property (без завершающего двоеточия);
     если property не извлечён — начало цитаты источника."""
     if not _is_junk_label(fact.property):
-        direction = direction_label(_normalize_effect_direction(fact.effect_direction))
+        direction = direction_label(normalize_effect_direction(fact.effect_direction))
         if direction and direction != "unknown":
             return f"{fact.property}: {direction}"
         return fact.property

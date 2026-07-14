@@ -6,8 +6,9 @@ from typing import Any
 
 
 def canonical_text(value: str) -> str:
-    """Каноническая форма текста для сравнения сущностей и фактов:
-    casefold + ё→е + схлопывание пробелов (общая для query- и storage-слоёв)."""
+    """Каноническая форма текста для сравнения сущностей и фактов: casefold +
+    ё→е + замена последовательностей пробельных символов одним пробелом
+    (общая для query- и storage-слоёв)."""
     return " ".join(value.strip().casefold().replace("ё", "е").split())
 
 
@@ -35,20 +36,47 @@ def direction_label(direction: str) -> str:
     return {"increase": "рост", "decrease": "снижение", "neutral": "без изменений"}.get(direction, direction)
 
 
-# Мусорные подписи КГ: единый список для гигиены данных у источника
+def normalize_effect_direction(value: Any) -> str:
+    """Канон направления эффекта (increase/decrease/neutral) из русских и
+    английских вариантов, ё-толерантно. Единственная копия: используется
+    нормализацией фактов (storage) и поиском противоречий (query) — единая
+    реализация исключает расхождение наборов алиасов между слоями
+    (например, потерю no_change/increased)."""
+    text = str(value or "unknown").strip().lower().replace("ё", "е")
+    aliases = {
+        "increase": "increase",
+        "increased": "increase",
+        "рост": "increase",
+        "увеличение": "increase",
+        "повышение": "increase",
+        "decrease": "decrease",
+        "decreased": "decrease",
+        "снижение": "decrease",
+        "уменьшение": "decrease",
+        "падение": "decrease",
+        "neutral": "neutral",
+        "no_change": "neutral",
+        "без изменений": "neutral",
+        "нет изменений": "neutral",
+    }
+    return aliases.get(text, text or "unknown")
+
+
+# Значения-заглушки в подписях КГ: единый список для гигиены данных у источника
 # (clean_extracted), для подписей узлов графа (_is_junk_label в storage.py)
-# и для зачистки Neo4j (_cleanup_junk_nodes). trim/casefold/ё→е.
+# и для удаления таких узлов из Neo4j (_cleanup_junk_nodes). trim/casefold/ё→е.
 JUNK_VALUES = frozenset({
     "", "не указано", "unknown", "n/a", "-", "нет данных", "none", "null",
-    # дефолты извлечения (см. _fact_from_candidate / _is_missing_value)
+    # значения по умолчанию при извлечении (см. _fact_from_candidate / _is_missing_value)
     "unknown material", "unknown property", "unknown process", "unknown lab",
 })
 
 
 def clean_extracted(value: str | None) -> str:
-    """Гигиена извлечённого значения у источника: мусорная строка из КГ-списка
+    """Гигиена извлечённого значения у источника: строка-заглушка из КГ-списка
     ('не указано', 'unknown', 'n/a', '-', 'нет данных', 'none', 'null' и
-    производные) превращается в ''. Остальное отдаётся с обрезанными пробелами.
+    производные) преобразуется в ''. Остальные значения возвращаются с
+    обрезанными пробелами.
     Единственная точка маппинга — используется при создании факта, в проекции
     семантики и в бэкфиле существующих данных."""
     text = str(value or "").strip()

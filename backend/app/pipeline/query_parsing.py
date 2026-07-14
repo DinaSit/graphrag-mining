@@ -38,8 +38,8 @@ class LLMQuestionParser:
         self.model = model
 
     async def parse_question(self, question: str) -> ParsedQuestion:
-        # Отказ LLM не маскируется: LLMUnavailableError уходит наверх,
-        # оркестратор явно сообщает о нём и собирает ответ без плана
+        # Отказ LLM не маскируется: LLMUnavailableError пробрасывается
+        # вызывающему, оркестратор явно сообщает о нём и собирает ответ без плана
         raw = await chat_json(
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},

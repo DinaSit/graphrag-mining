@@ -57,12 +57,15 @@ class DocumentRecord(BaseModel):
     # Скрытый документ полностью выпадает из ответов (факты, поиск, граф),
     # но данные не удаляются и Neo4j не перестраивается
     hidden: bool = False
-    # Эвристические признаки документа (см. pipeline/document_traits.py);
-    # None — признак ещё не вычислен
+    # Признаки документа (см. pipeline/document_traits.py); None — не вычислен.
+    # is_scientific и doc_type — LLM-классификация по титульнику, обоснование
+    # в trait_reason; origin — эвристика по языку текста
     is_scientific: bool | None = None
     origin: str | None = None  # "ru" | "foreign"
-    # Год издания из ТЕКСТА документа (не из даты файла); best-effort эвристика
-    # extract_publication_year. None — год не найден или ещё не вычислен
+    doc_type: str | None = None  # статья | доклад | отчёт | обзор | патент | презентация
+    trait_reason: str | None = None  # обоснование LLM (одна фраза с цитатой)
+    # Год издания: имя файла имеет приоритет над текстом (см.
+    # extract_publication_year); None — год не найден или ещё не вычислен
     year: int | None = None
 
 
@@ -121,7 +124,7 @@ class Fact(BaseModel):
     status: str = "approved"
     is_hypothesis: bool = False
     # id фактов с противоположным эффектом по тому же материалу и свойству;
-    # оба факта сохраняются, статус conflicting помечает зону разногласий
+    # оба факта сохраняются, статус conflicting помечает противоречие
     conflicts_with: list[str] = Field(default_factory=list)
     source: SourceRef
 
@@ -182,9 +185,6 @@ class QueryResponse(BaseModel):
     gaps: list[str]
     confidence: float
     hypotheses: list[str] = Field(default_factory=list)
-    # УСТАРЕЛО (совместимость): веб-поиск вынесен в отдельный контур
-    # POST /web/answer и больше не заполняет это поле в /ask и /ask/stream
-    web_answer: dict[str, Any] | None = None
     # Обе LLM недоступны: человекочитаемая причина; ответ собран без генерации
     llm_error: str | None = None
     # Семантический поиск bge-m3 — работает без LLM, показывается пользователю
@@ -197,15 +197,17 @@ class QueryResponse(BaseModel):
     related_sources: list[SourceRef] = Field(default_factory=list)
     related_graph: GraphPayload = Field(default_factory=GraphPayload)
     evidence_status: str = "none"  # direct / partial / none
-    # Вопрос не про базу знаний (смолток/оффтоп): полный пайплайн, включая
-    # LLM, граф и веб-поиск, не запускался — ответ мгновенный
+    # Вопрос не относится к базе знаний (разговорный или вне предметной
+    # области): полный пайплайн, включая LLM, граф и веб-поиск,
+    # не запускался — ответ мгновенный
     offtopic: bool = False
     # Какой веткой собран ответ: "fast" — классический RAG (только семантический
     # поиск, без LLM-планировщика и графа), "full" — полный пайплайн
     pipeline_mode: str = "full"
-    # Доля файлов с is_scientific=True среди файлов, на которые ссылаются
-    # СНОСКИ ответа (0..1, 2 знака); без цитат — по итоговому списку sources;
-    # None — ни у одного файла-источника признак не вычислен
+    # Научность ответа = научные сноски / все сноски (0..1, 2 знака): параметр
+    # самого ответа, как confidence. Сноска научная, если её документ имеет
+    # is_scientific=True; None — у ответа нет сносок (доля не определена).
+    # В SSE-предпросмотре (evidence) всегда None: сносок до генерации нет
     scientific_share: float | None = None
 
 
@@ -248,15 +250,5 @@ class RejectFactRequest(BaseModel):
     note: str | None = None
 
 
-class OntologyCandidate(BaseModel):
-    id: str
-    proposed_name: str
-    kind: str
-    examples: list[str] = Field(default_factory=list)
-    similar_existing_types: list[str] = Field(default_factory=list)
-    confidence: float
-    status: CandidateStatus = CandidateStatus.pending_review
-
-
-# SearchHit объявлен ниже QueryResponse: форвард-ссылка резолвится после определения
+# SearchHit объявлен ниже QueryResponse: опережающая ссылка разрешается после определения
 QueryResponse.model_rebuild()

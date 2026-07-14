@@ -13,7 +13,6 @@ from app.schemas import (
     DocumentVersion,
     ExtractionCandidate,
     Fact,
-    OntologyCandidate,
     SourceFragment,
     SourceRef,
 )
@@ -30,9 +29,50 @@ except ImportError:  # pragma: no cover
 
 log = logging.getLogger(__name__)
 
-# Маркер строк-кандидатов онтологии в таблице ontology_versions: она хранит
-# и версии конфигурации, и решения по кандидатам новых типов
-ONTOLOGY_CANDIDATE_KIND = "ontology-candidate"
+# Единственный источник порядка колонок документа: SELECT-списки, позиционный
+# маппинг строки и SQL в upsert_document строятся отсюда — новое поле
+# добавляется в ОДНОМ месте (плюс ALTER в ensure_schema)
+_DOC_COLUMNS = (
+    "id", "filename", "document_type", "source_label", "access_level", "checksum",
+    "current_version_id", "status", "element_count", "storage_bucket", "storage_object",
+    "storage_uri", "created_at", "hidden", "is_scientific", "origin", "year",
+    "preview_object", "doc_type", "trait_reason",
+)
+
+
+def _document_from_row(row: tuple) -> DocumentRecord:
+    """Строка БД (в порядке _DOC_COLUMNS) → DocumentRecord."""
+    data = dict(zip(_DOC_COLUMNS, row))
+    data["hidden"] = bool(data["hidden"])
+    return DocumentRecord(**data)
+
+
+# Порядок колонок версии документа: SELECT-списки в get_document_by_checksum
+# и load_state и позиционный маппинг строки строятся отсюда
+_VERSION_COLUMNS = ("id", "document_id", "checksum", "version_number", "status", "parser", "created_at")
+
+
+def _version_from_row(row: tuple) -> DocumentVersion:
+    """Строка БД (в порядке _VERSION_COLUMNS) → DocumentVersion."""
+    return DocumentVersion(**dict(zip(_VERSION_COLUMNS, row)))
+
+
+# Порядок колонок факта: SELECT в load_state и позиционный маппинг строки
+# строятся отсюда; INSERT в upsert_fact перечисляет те же колонки в том же порядке
+_FACT_COLUMNS = (
+    "id", "candidate_id", "material", "material_id", "experiment_id", "sample", "process",
+    "temperature_c", "duration_h", "property", "effect_direction", "effect_value", "effect_unit",
+    "result_value", "result_unit", "lab", "team", "equipment", "confidence", "status",
+    "is_hypothesis", "conflicts_with", "source",
+)
+
+
+def _fact_from_row(row: tuple) -> Fact:
+    """Строка БД (в порядке _FACT_COLUMNS) → Fact; source обязателен (фильтрует вызывающий)."""
+    data = dict(zip(_FACT_COLUMNS, row))
+    data["conflicts_with"] = data["conflicts_with"] or []
+    data["source"] = SourceRef(**data["source"])
+    return Fact(**data)
 
 
 class PostgresSink:
@@ -48,51 +88,22 @@ class PostgresSink:
     def upsert_document(self, document: DocumentRecord, version: DocumentVersion) -> None:
         if not self.enabled:
             return
+        # SQL целиком выводится из _DOC_COLUMNS: новое поле документа не требует
+        # правки этого метода. id/checksum/created_at при конфликте не обновляются
+        columns = ", ".join(_DOC_COLUMNS)
+        placeholders = ", ".join(["%s"] * len(_DOC_COLUMNS))
+        updates = ", ".join(
+            f"{column} = EXCLUDED.{column}" for column in _DOC_COLUMNS
+            if column not in ("id", "checksum", "created_at")
+        )
+        values = tuple(
+            document.status.value if column == "status" else getattr(document, column)
+            for column in _DOC_COLUMNS
+        )
         self._execute(
-            """
-            INSERT INTO documents (
-              id, filename, document_type, source_label, access_level, checksum, current_version_id, status,
-              element_count, storage_bucket, storage_object, storage_uri, created_at, hidden, is_scientific, origin,
-              year, preview_object
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (id) DO UPDATE SET
-              filename = EXCLUDED.filename,
-              document_type = EXCLUDED.document_type,
-              source_label = EXCLUDED.source_label,
-              access_level = EXCLUDED.access_level,
-              current_version_id = EXCLUDED.current_version_id,
-              status = EXCLUDED.status,
-              element_count = EXCLUDED.element_count,
-              storage_bucket = EXCLUDED.storage_bucket,
-              storage_object = EXCLUDED.storage_object,
-              storage_uri = EXCLUDED.storage_uri,
-              hidden = EXCLUDED.hidden,
-              is_scientific = EXCLUDED.is_scientific,
-              origin = EXCLUDED.origin,
-              year = EXCLUDED.year,
-              preview_object = EXCLUDED.preview_object
-            """,
-            (
-                document.id,
-                document.filename,
-                document.document_type,
-                document.source_label,
-                document.access_level,
-                document.checksum,
-                document.current_version_id,
-                document.status.value,
-                document.element_count,
-                document.storage_bucket,
-                document.storage_object,
-                document.storage_uri,
-                document.created_at,
-                document.hidden,
-                document.is_scientific,
-                document.origin,
-                document.year,
-                document.preview_object,
-            ),
+            f"INSERT INTO documents ({columns}) VALUES ({placeholders}) "
+            f"ON CONFLICT (id) DO UPDATE SET {updates}",
+            values,
         )
         self._execute(
             """
@@ -117,14 +128,13 @@ class PostgresSink:
         try:
             with psycopg.connect(self.database_url) as connection:
                 with connection.cursor() as cursor:
+                    doc_cols = ", ".join(f"d.{column}" for column in _DOC_COLUMNS)
+                    version_cols = ", ".join(f"v.{column}" for column in _VERSION_COLUMNS)
                     cursor.execute(
-                        """
+                        f"""
                         SELECT
-                          d.id, d.filename, d.document_type, d.source_label, d.access_level, d.checksum,
-                          d.current_version_id, d.status, d.element_count, d.storage_bucket, d.storage_object,
-                          d.storage_uri, d.created_at,
-                          v.id, v.document_id, v.checksum, v.version_number, v.status, v.parser, v.created_at,
-                          d.hidden, d.is_scientific, d.origin, d.year, d.preview_object
+                          {doc_cols},
+                          {version_cols}
                         FROM documents d
                         JOIN document_versions v ON v.id = d.current_version_id
                         WHERE d.checksum = %s
@@ -135,35 +145,8 @@ class PostgresSink:
                     row = cursor.fetchone()
             if row is None:
                 return None
-            document = DocumentRecord(
-                id=row[0],
-                filename=row[1],
-                document_type=row[2],
-                source_label=row[3],
-                access_level=row[4],
-                checksum=row[5],
-                current_version_id=row[6],
-                status=row[7],
-                element_count=row[8],
-                storage_bucket=row[9],
-                storage_object=row[10],
-                storage_uri=row[11],
-                created_at=row[12],
-                hidden=bool(row[20]),
-                is_scientific=row[21],
-                origin=row[22],
-                year=row[23],
-                preview_object=row[24],
-            )
-            version = DocumentVersion(
-                id=row[13],
-                document_id=row[14],
-                checksum=row[15],
-                version_number=row[16],
-                status=row[17],
-                parser=row[18],
-                created_at=row[19],
-            )
+            document = _document_from_row(row[:len(_DOC_COLUMNS)])
+            version = _version_from_row(row[len(_DOC_COLUMNS):])
             return document, version
         except Exception as exc:  # pragma: no cover - integration-only path
             self.last_error = str(exc)
@@ -296,7 +279,8 @@ class PostgresSink:
         if not self.enabled:
             return
         # Размерность векторов задаёт модель эмбеддингов (EMBEDDING_DIM тот же,
-        # что читает провайдер); дефолт 64 — детерминированный hash-эмбеддер
+        # что читает провайдер); значение по умолчанию 64 — детерминированный
+        # hash-эмбеддер
         dim = int(os.environ.get("EMBEDDING_DIM", "64"))
         statements = [
             "ALTER TABLE documents ADD COLUMN IF NOT EXISTS storage_bucket VARCHAR(256)",
@@ -311,6 +295,10 @@ class PostgresSink:
             # Ключ PDF-превью DOCX/PPTX в MinIO (<storage_object>.preview.pdf);
             # NULL — превью нет. 1024 (storage_object) + суффикс ".preview.pdf"
             "ALTER TABLE documents ADD COLUMN IF NOT EXISTS preview_object VARCHAR(1040)",
+            # Тип документа и обоснование LLM-классификации (тип+научность);
+            # NULL — ещё не классифицирован (LLM была недоступна)
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS doc_type TEXT",
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS trait_reason TEXT",
             "ALTER TABLE facts ADD COLUMN IF NOT EXISTS conflicts_with JSONB NOT NULL DEFAULT '[]'::jsonb",
             # Индекс векторного поиска: близость считает PostgreSQL, а не backend
             "CREATE INDEX IF NOT EXISTS fragment_vectors_embedding_idx ON fragment_vectors USING hnsw (embedding vector_cosine_ops)",
@@ -392,6 +380,7 @@ class PostgresSink:
                         ORDER BY embedding <=> %s::vector
                         LIMIT %s
                         """,
+                        # str(list) даёт "[0.1, 0.2, …]" — валидный литерал pgvector
                         (str(query_vector), str(query_vector), top_k),
                     )
                     return [(row[0], float(row[1])) for row in cursor.fetchall()]
@@ -403,8 +392,9 @@ class PostgresSink:
     def load_state(self) -> dict[str, dict[str, Any]]:
         """Загружает сохранённое состояние для восстановления ApplicationStore после рестарта.
 
-        Ошибка загрузки пробрасывается: частичное состояние опаснее падения —
-        оно выглядит как рабочая система с молча потерянными фактами.
+        Ошибка загрузки пробрасывается: частичное состояние опаснее остановки
+        при старте — система выглядит рабочей, при этом часть фактов потеряна
+        без каких-либо признаков сбоя.
         """
         state: dict[str, dict[str, Any]] = {
             "documents": {},
@@ -413,56 +403,19 @@ class PostgresSink:
             "candidates": {},
             "facts": {},
             "vectors": {},
-            "ontology_candidates": {},
         }
         if not self.enabled:
             return state
         try:
             with psycopg.connect(self.database_url) as connection:
                 with connection.cursor() as cursor:
-                    cursor.execute(
-                        """
-                        SELECT id, filename, document_type, source_label, access_level, checksum,
-                               current_version_id, status, element_count, storage_bucket, storage_object,
-                               storage_uri, created_at, hidden, is_scientific, origin, year, preview_object
-                        FROM documents
-                        """
-                    )
+                    cursor.execute(f"SELECT {', '.join(_DOC_COLUMNS)} FROM documents")
                     for row in cursor.fetchall():
-                        state["documents"][row[0]] = DocumentRecord(
-                            id=row[0],
-                            filename=row[1],
-                            document_type=row[2],
-                            source_label=row[3],
-                            access_level=row[4],
-                            checksum=row[5],
-                            current_version_id=row[6],
-                            status=row[7],
-                            element_count=row[8],
-                            storage_bucket=row[9],
-                            storage_object=row[10],
-                            storage_uri=row[11],
-                            created_at=row[12],
-                            hidden=bool(row[13]),
-                            is_scientific=row[14],
-                            origin=row[15],
-                            year=row[16],
-                            preview_object=row[17],
-                        )
+                        state["documents"][row[0]] = _document_from_row(row)
 
-                    cursor.execute(
-                        "SELECT id, document_id, checksum, version_number, status, parser, created_at FROM document_versions"
-                    )
+                    cursor.execute(f"SELECT {', '.join(_VERSION_COLUMNS)} FROM document_versions")
                     for row in cursor.fetchall():
-                        state["versions"][row[0]] = DocumentVersion(
-                            id=row[0],
-                            document_id=row[1],
-                            checksum=row[2],
-                            version_number=row[3],
-                            status=row[4],
-                            parser=row[5],
-                            created_at=row[6],
-                        )
+                        state["versions"][row[0]] = _version_from_row(row)
 
                     cursor.execute(
                         """
@@ -498,54 +451,16 @@ class PostgresSink:
                             review_note=row[6],
                         )
 
-                    cursor.execute(
-                        """
-                        SELECT id, candidate_id, material, material_id, experiment_id, sample, process,
-                               temperature_c, duration_h, property, effect_direction, effect_value, effect_unit,
-                               result_value, result_unit, lab, team, equipment, confidence, status, is_hypothesis,
-                               conflicts_with, source
-                        FROM facts
-                        """
-                    )
+                    cursor.execute(f"SELECT {', '.join(_FACT_COLUMNS)} FROM facts")
                     for row in cursor.fetchall():
-                        if not row[22]:
+                        # Факт без source нарушает инвариант провенанса — не восстанавливается
+                        if not row[-1]:  # source — последняя колонка _FACT_COLUMNS
                             continue
-                        state["facts"][row[0]] = Fact(
-                            id=row[0],
-                            candidate_id=row[1],
-                            material=row[2],
-                            material_id=row[3],
-                            experiment_id=row[4],
-                            sample=row[5],
-                            process=row[6],
-                            temperature_c=row[7],
-                            duration_h=row[8],
-                            property=row[9],
-                            effect_direction=row[10],
-                            effect_value=row[11],
-                            effect_unit=row[12],
-                            result_value=row[13],
-                            result_unit=row[14],
-                            lab=row[15],
-                            team=row[16],
-                            equipment=row[17],
-                            confidence=row[18],
-                            status=row[19],
-                            is_hypothesis=row[20],
-                            conflicts_with=row[21] or [],
-                            source=SourceRef(**row[22]),
-                        )
+                        state["facts"][row[0]] = _fact_from_row(row)
 
                     cursor.execute("SELECT fragment_id, embedding FROM fragment_vectors WHERE embedding IS NOT NULL")
                     for row in cursor.fetchall():
                         state["vectors"][row[0]] = json.loads(str(row[1]))
-
-                    cursor.execute(
-                        "SELECT id, config FROM ontology_versions WHERE version = %s",
-                        (ONTOLOGY_CANDIDATE_KIND,),
-                    )
-                    for row in cursor.fetchall():
-                        state["ontology_candidates"][row[0]] = OntologyCandidate(**(row[1] or {}))
         except Exception as exc:
             self.last_error = str(exc)
             log.error("PostgreSQL: восстановление состояния не выполнено: %s", exc)
@@ -581,14 +496,14 @@ class Neo4jSink:
         self._driver = None
         self._constraints_applied = False
         if self.enabled:
-            # Недоступность Neo4j на старте не валит backend: constraints
-            # доприменятся перед первой успешной записью
+            # Недоступность Neo4j на старте не прерывает запуск backend:
+            # constraints будут применены перед первой успешной записью
             try:
                 self._ensure_constraints()
             except Exception as exc:
                 log.error("Neo4j: constraints при старте не применены: %s", exc)
-            # Исторический мусор ('не указано', 'unknown'…) из прежних загрузок
-            # вычищается один раз при старте — после constraints
+            # Значения-заглушки ('не указано', 'unknown'…) из прежних загрузок
+            # удаляются один раз при старте — после constraints
             try:
                 self._cleanup_junk_nodes()
             except Exception as exc:
@@ -599,8 +514,9 @@ class Neo4jSink:
         return bool(self.uri and self.user and self.password and GraphDatabase is not None)
 
     def _get_driver(self):
-        # Один драйвер на процесс: драйвер держит пул соединений и потокобезопасен,
-        # создание нового на каждый запрос — лавина TCP-сессий под нагрузкой
+        # Один драйвер на процесс: драйвер поддерживает пул соединений и
+        # потокобезопасен; создание нового на каждый запрос ведёт к
+        # неограниченному росту числа TCP-сессий под нагрузкой
         if self._driver is None:
             self._driver = GraphDatabase.driver(self.uri, auth=(self.user, self.password))
         return self._driver
@@ -620,9 +536,10 @@ class Neo4jSink:
         self._constraints_applied = True
 
     def _cleanup_junk_nodes(self) -> None:
-        """Идемпотентно вычищает исторический мусор: узлы онтологических меток,
-        чьё name (после toLower/ё→е) входит в список мусорных подписей КГ.
-        DETACH DELETE — вместе со связями. Ошибки логируются выше, не роняют старт."""
+        """Идемпотентно удаляет узлы онтологических меток из прежних загрузок,
+        чьё name (после toLower/ё→е) входит в список подписей-заглушек КГ.
+        DETACH DELETE — вместе со связями. Ошибки логируются выше и не
+        прерывают старт."""
         # ё→е нормализуется на стороне Cypher (replace), список — единый JUNK_VALUES
         junk = [value for value in JUNK_VALUES if value]
         labels = sorted(self.ONTOLOGY_LABELS | {"Effect", "Laboratory"})
@@ -767,6 +684,8 @@ class Neo4jSink:
 
 
 def _normalize_database_url(value: str | None) -> str | None:
+    # DATABASE_URL из окружения может приходить в форме SQLAlchemy
+    # (postgresql+psycopg://); psycopg.connect понимает только чистую схему
     if not value:
         return None
     return value.replace("postgresql+psycopg://", "postgresql://")

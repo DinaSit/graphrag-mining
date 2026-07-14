@@ -117,14 +117,15 @@ class MockLLMProvider:
 class RemoteEmbeddingProvider:
     """HTTP-адаптер к внешнему сервису эмбеддингов (POST {url} → {"embeddings": [...]}).
 
-    Fallback на детерминированный провайдер отсутствует намеренно: сбой индексации
-    должен быть видимым, смешение векторов разных моделей делает поиск некорректным.
+    Резервный переход на детерминированный провайдер отсутствует намеренно: сбой
+    индексации должен быть видимым, смешение векторов разных моделей делает поиск
+    некорректным.
     """
 
     name = "remote-embeddings"
 
-    # Кэш держит эмбеддинги повторных вопросов и неизменённых фрагментов
-    # (reprocess, переиндексация при старте) — без похода в сервис
+    # Кэш хранит эмбеддинги повторных вопросов и неизменённых фрагментов
+    # (reprocess, переиндексация при старте) — без обращения к сервису
     _CACHE_MAX = 20000
 
     def __init__(self, embed_url: str):
@@ -188,7 +189,7 @@ class RemoteExtractionProvider:
         self.timeout = float(os.environ.get("EXTRACTION_TIMEOUT", "8"))
 
     def extract_entities(self, fragments: list[SourceFragment]) -> list[ExtractionCandidate]:
-        # Фрагменты отправляются пачками: один запрос на весь документ
+        # Фрагменты отправляются партиями: один запрос на весь документ
         # не укладывается в таймаут (особенно сканы с vision-обработкой)
         batch_size = int(os.environ.get("EXTRACTION_BATCH_SIZE", "8"))
         candidates: list[ExtractionCandidate] = []
@@ -205,9 +206,10 @@ class RemoteExtractionProvider:
                 with urllib.request.urlopen(request, timeout=self.timeout) as response:
                     data = json.loads(response.read().decode("utf-8"))
             except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-                # Молчаливый откат на мок маскировал пустое извлечение под completed
-                # (документ «обработан», кандидатов ноль). Ошибка должна быть видимой:
-                # job помечается failed, документ остаётся необработанным.
+                # Скрытый переход на mock-провайдер недопустим: пустое извлечение
+                # получило бы статус completed (документ «обработан», кандидатов ноль).
+                # Ошибка должна быть видимой: job помечается failed, документ
+                # остаётся необработанным.
                 raise RuntimeError(f"Сервис извлечения недоступен, инжест остановлен: {exc}") from exc
             candidates.extend(ExtractionCandidate.model_validate(item) for item in data.get("candidates", []))
         return candidates

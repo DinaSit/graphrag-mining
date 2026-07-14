@@ -24,13 +24,13 @@ CONVERTIBLE = {".doc"}
 
 
 # Извлечение реального документа занимает минуты; предел ожидания одного job —
-# с большим запасом, чтобы не бросить живую обработку
+# с большим запасом, чтобы не прервать ещё выполняющуюся обработку
 JOB_WAIT_LIMIT = 3600.0
 JOB_POLL_INTERVAL = 3.0
 
 
 def wait_for_job(backend: str, job_id: str) -> dict:
-    """Поллит GET /jobs/{job_id} до completed/failed; возвращает финальный job."""
+    """Опрашивает GET /jobs/{job_id} до completed/failed; возвращает финальный job."""
     deadline = time.monotonic() + JOB_WAIT_LIMIT
     while time.monotonic() < deadline:
         response = httpx.get(f"{backend}/jobs/{job_id}", timeout=30)
@@ -105,7 +105,7 @@ def main() -> int:
                 response.raise_for_status()
                 payload = response.json()
                 # Очередь отвечает мгновенным "queued": реальный итог известен
-                # только после завершения job (иначе фоновые падения инжеста
+                # только после завершения job (иначе сбои фонового инжеста
                 # не попали бы в статистику)
                 if payload.get("status") == "queued" and payload.get("job_id"):
                     job = wait_for_job(args.backend, payload["job_id"])
@@ -114,7 +114,7 @@ def main() -> int:
                     loaded.append(path.name)
                     print(f"OK за {time.monotonic() - t0:.0f}с")
                 else:
-                    # синхронный режим backend или дубль по чек-сумме
+                    # синхронный режим backend или дубликат по контрольной сумме
                     units = payload.get("evidence_units", "?")
                     loaded.append(path.name)
                     print(f"OK: {units} evidence units за {time.monotonic() - t0:.0f}с")

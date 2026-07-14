@@ -13,7 +13,7 @@ except ImportError:  # pragma: no cover
 log = logging.getLogger(__name__)
 
 # Ключ PDF-превью офисного документа: <ключ оригинала> + этот суффикс —
-# превью лежит в бакете рядом с оригиналом
+# превью хранится в бакете рядом с оригиналом
 PREVIEW_SUFFIX = ".preview.pdf"
 
 
@@ -79,10 +79,10 @@ class MinioFileStorage:
             raise
 
     def put_preview(self, object_name: str, content: bytes) -> bool:
-        """Кладёт PDF-превью офисного документа по точному ключу (рядом с оригиналом).
+        """Сохраняет PDF-превью офисного документа по точному ключу (рядом с оригиналом).
 
         Превью необязательно: любой сбой не пробрасывается (warning в лог,
-        False) — инжест не должен падать из-за недоступного MinIO.
+        False) — инжест не должен завершаться ошибкой из-за недоступного MinIO.
         """
         if not self.enabled:
             return False
@@ -105,6 +105,15 @@ class MinioFileStorage:
             log.warning("MinIO: PDF-превью %s не сохранено: %s", object_name, exc)
             return False
 
+    def _read_object(self, client, object_name: str) -> bytes:
+        """Читает объект целиком, всегда возвращая соединение в пул urllib3."""
+        response = client.get_object(self.bucket, object_name)
+        try:
+            return response.read()
+        finally:
+            response.close()
+            response.release_conn()
+
     def get_object(self, object_name: str) -> bytes | None:
         """Содержимое объекта по точному ключу (оригинал или превью).
 
@@ -116,12 +125,7 @@ class MinioFileStorage:
         try:
             client = self._get_client()
             assert self.bucket is not None
-            response = client.get_object(self.bucket, object_name)
-            try:
-                data = response.read()
-            finally:
-                response.close()
-                response.release_conn()
+            data = self._read_object(client, object_name)
             self.last_error = None
             return data
         except Exception as exc:
@@ -143,19 +147,14 @@ class MinioFileStorage:
             prefix = f"documents/{document_id}/"
             objects = [
                 obj for obj in client.list_objects(self.bucket, prefix=prefix, recursive=True)
-                # PDF-превью лежит под тем же префиксом — оригиналом не считается
+                # PDF-превью хранится под тем же префиксом — оригиналом не считается
                 if not obj.object_name.endswith(PREVIEW_SUFFIX)
             ]
             if not objects:
                 return None
-            # У документа одна версия — под префиксом лежит один оригинал
+            # У документа одна версия — под префиксом хранится один оригинал
             object_name = objects[0].object_name
-            response = client.get_object(self.bucket, object_name)
-            try:
-                data = response.read()
-            finally:
-                response.close()
-                response.release_conn()
+            data = self._read_object(client, object_name)
             self.last_error = None
             return data, Path(object_name).name
         except Exception as exc:

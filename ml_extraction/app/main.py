@@ -21,6 +21,7 @@ from app.schemas import (
     WebAnswerResponse,
     WebSearchRequest,
     WebSearchResponse,
+    WebSourcesResponse,
 )
 from app.yandex_client import YandexClientError
 
@@ -79,16 +80,28 @@ async def chat_stream_endpoint(request: dict) -> StreamingResponse:
         except Exception as e:  # страховка контракта: терминальная запись обязана уйти
             log.exception("Сбой генератора /chat_stream")
             if not terminal_sent:
+                # error_text: у TimeoutError/CancelledError str(e) пуст — причина не теряется
                 terminal = {"done": True, "text": "", "provider": "none",
-                            "error": {"kind": "unavailable", "message": str(e)[:300]}}
+                            "error": {"kind": "unavailable", "message": yandex_client.error_text(e)[:300]}}
                 yield f"data: {json.dumps(terminal, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
+@app.get("/web_sources", response_model=WebSourcesResponse)
+def web_sources() -> WebSourcesResponse:
+    """Дефолтный реестр веб-источников: ddgs-домены (ALLOWED_DOMAINS) + научные
+    API. Единственный источник правды — этот сервис; UI берёт реестр отсюда."""
+    return WebSourcesResponse(sources=web_search.default_sources())
+
+
 @app.post("/web_search", response_model=WebSearchResponse)
 async def web_search_endpoint(request: WebSearchRequest) -> WebSearchResponse:
-    """Чистый поиск (контракт К3): ddgs по разрешённым доменам + научные API, без LLM."""
+    """Чистый поиск (контракт К3): ddgs по разрешённым доменам + научные API, без LLM.
+
+    UI напрямую не обращается к этому эндпоинту (запросы идут через /web_answer),
+    но эндпоинт — часть контракта К3 с backend и диагностический вход: запрос
+    curl показывает вклад каждой ветки поиска по меткам source. Не удалять."""
     result = await web_search.search_results(request.question)
     return WebSearchResponse(**result)
 
@@ -97,11 +110,13 @@ async def web_search_endpoint(request: WebSearchRequest) -> WebSearchResponse:
 async def web_answer(request: WebAnswerRequest) -> WebAnswerResponse:
     """Ответ из внешних источников (разрешённый список доменов). В граф не пишет.
 
-    Сам поиск LLM не требует; связная формулировка — через каскад LLM,
+    Этап поиска LLM не требует; связная формулировка — через каскад LLM,
     при отказе обеих моделей возвращаются сырые выдержки со ссылками.
     Если в запросе передана готовая выдача results (К3) — поиск пропускается.
+    sources — реестр источников из UI (см. WebAnswerRequest), None = значения по умолчанию.
     """
-    result = await web_search.answer_from_web(request.question, results=request.results)
+    result = await web_search.answer_from_web(
+        request.question, results=request.results, sources=request.sources)
     return WebAnswerResponse(**result)
 
 

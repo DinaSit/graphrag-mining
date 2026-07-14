@@ -59,11 +59,21 @@ class WebSearchResponse(BaseModel):
     query_used: str = ""
 
 
+class WebSourcesResponse(BaseModel):
+    # Дефолтный реестр веб-источников: [{"host", "url", "title"[, "api"]}]
+    sources: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class WebAnswerRequest(BaseModel):
     question: str
     # Необязательная готовая выдача формата /web_search (К3): передана и непуста —
     # собственный поиск пропускается, сразу LLM-суммаризация по ней
     results: list[dict[str, Any]] | None = None
+    # Реестр источников из UI: [{"host": str}]. Домены ищутся ddgs русским
+    # вопросом и английским переводом; хосты научных API (arxiv/crossref/
+    # semanticscholar) включают соответствующие API. None — значения по
+    # умолчанию (ALLOWED_DOMAINS + все три API)
+    sources: list[dict[str, Any]] | None = None
 
 
 class WebAnswerResponse(BaseModel):

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.schemas import CandidateStatus, ExtractionCandidate, OntologyCandidate, SourceRef, SourceFragment
+from app.schemas import CandidateStatus, ExtractionCandidate, SourceRef, SourceFragment
 from app.storage import ApplicationStore
 
 
@@ -65,14 +65,6 @@ def seed_sample_data(store: ApplicationStore, extra_pdf_dir: Path | None = None)
         store.add_candidate(candidate)
 
     store.index_fragments(list(store.fragments.values()))
-    store.ontology_candidates["otype-heat-route"] = OntologyCandidate(
-        id="otype-heat-route",
-        proposed_name="HeatTreatmentRoute",
-        kind="entity_type",
-        examples=["sample-fragment-001", "sample-fragment-009", "sample-fragment-017"],
-        similar_existing_types=["Process", "ProcessStep"],
-        confidence=0.84,
-    )
     if extra_pdf_dir and extra_pdf_dir.exists():
         for pdf_path in sorted(extra_pdf_dir.glob("*.pdf")):
             store.ingest_document(
@@ -90,7 +82,14 @@ def _build_experiments() -> list[dict[str, object]]:
     counter = 1
     for material_index, material in enumerate(MATERIALS):
         for temp_index, temp in enumerate(temperatures):
+            # Разнообразие без random: свойства, направления и величины
+            # раскладываются по остаткам от деления — демо-данные стабильны
+            # между запусками
             prop = PROPERTIES[(material_index + temp_index) % len(PROPERTIES)]
+            # Сценарий «пика старения» для Сплава X: твёрдость растёт при 720 °C
+            # и падает при 735 °C — физически согласованная пара, которую детектор
+            # противоречий обязан НЕ считать противоречием (_comparable_conditions
+            # в query.py)
             if material == "Сплав X" and temp in {705, 720, 735}:
                 prop = "твёрдость"
             direction = "increase" if (temp + material_index * 13) % 3 != 0 else "decrease"
@@ -122,6 +121,9 @@ def _build_experiments() -> list[dict[str, object]]:
                 }
             )
             counter += 1
+    # Намеренно заложенное противоречие для демо детектора: повтор условий
+    # «Сплав X, старение, 720 °C» с противоположным направлением эффекта
+    # из другой лаборатории (team «Team-contradiction»)
     rows.append(
         {
             "material": "Сплав X",

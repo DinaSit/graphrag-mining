@@ -48,8 +48,9 @@ def normalize_text(text: str) -> str:
 
 
 def decode_text(content: bytes) -> str:
-    """Легаси-экспорты из лабораторий часто в Windows-1251: сначала строгие
-    кодировки, замена битых байтов — только последний фолбэк."""
+    """Экспорты из устаревших лабораторных систем часто в Windows-1251: сначала
+    строгие кодировки, замена некорректных байтов — только последний резервный
+    вариант."""
     for encoding in ("utf-8-sig", "cp1251"):
         try:
             return content.decode(encoding)
@@ -59,6 +60,9 @@ def decode_text(content: bytes) -> str:
 
 
 def split_text_blocks(text: str, max_chars: int = 3500) -> list[str]:
+    """Разбивает текст на блоки по пустым строкам; блок длиннее max_chars
+    дополнительно разбивается по границам предложений. Предложение длиннее
+    лимита остаётся целым блоком — разрыв внутри фразы намеренно не выполняется."""
     raw_blocks = [block.strip() for block in re.split(r"\n\s*\n", text) if block.strip()]
     if not raw_blocks and text.strip():
         raw_blocks = [text.strip()]
@@ -83,10 +87,10 @@ def split_text_blocks(text: str, max_chars: int = 3500) -> list[str]:
 
 
 def merge_short_blocks(blocks: list[str], min_chars: int = 60) -> list[str]:
-    """Короткие блоки (заголовок, строка оглавления, номер страницы) не живут
-    поодиночке: блок короче min_chars приклеивается к СЛЕДУЮЩЕМУ (заголовок —
-    контекст абзаца) через перенос строки; если следующего нет — к предыдущему;
-    совсем пустые пропускаются. Общий помощник для PlainText/Pdf/Pptx-путей —
+    """Короткие блоки (заголовок, строка оглавления, номер страницы) не остаются
+    отдельными фрагментами: блок короче min_chars присоединяется к СЛЕДУЮЩЕМУ
+    (заголовок — контекст абзаца) через перенос строки; если следующего нет — к
+    предыдущему; пустые пропускаются. Общий помощник для PlainText/Pdf/Pptx-путей —
     тонкая обёртка над _merge_short_with_sections без разделов."""
     return [block for block, _ in _merge_short_with_sections([(block, "") for block in blocks], min_chars)]
 
@@ -94,7 +98,7 @@ def merge_short_blocks(blocks: list[str], min_chars: int = 60) -> list[str]:
 def _merge_short_with_sections(pairs: list[tuple[str, str]], min_chars: int = 60) -> list[tuple[str, str]]:
     """Склейка коротких блоков, где каждый блок несёт свой раздел (section).
     Склеенный фрагмент получает раздел содержательного (якорного) блока —
-    того, к которому приклеились короткие заголовки/строки перед ним."""
+    того, к которому присоединены предшествующие короткие заголовки/строки."""
     cleaned = [(block.strip(), section) for block, section in pairs if block and block.strip()]
     if not cleaned:
         return []
@@ -109,7 +113,8 @@ def _merge_short_with_sections(pairs: list[tuple[str, str]], min_chars: int = 60
             continue
         result.append((block, section))
     if pending:
-        # Хвост коротких блоков без следующего — к предыдущему, иначе сам по себе
+        # Оставшиеся короткие блоки без следующего присоединяются к предыдущему,
+        # иначе образуют отдельный фрагмент
         if result:
             last_block, last_section = result[-1]
             result[-1] = (f"{last_block}\n{pending}", last_section)
@@ -124,7 +129,7 @@ class PlainTextParser:
     def parse(self, document_id: str, version_id: str, filename: str, content: bytes) -> list[SourceFragment]:
         text = decode_text(content)
         # Короткие блоки (заголовок, строка оглавления) не становятся отдельными
-        # фрагментами — приклеиваются к соседнему содержательному
+        # фрагментами — присоединяются к соседнему содержательному
         blocks = merge_short_blocks(split_text_blocks(text))
         return [
             SourceFragment(
@@ -158,8 +163,8 @@ class CsvParser:
             if not values:
                 continue
             index += 1
-            # Дубли заголовков не схлопываются (как в DictReader), а получают
-            # суффикс; колонки сверх заголовка именуются по позиции
+            # Дубли заголовков не объединяются (как это происходит в DictReader),
+            # а получают суффикс; колонки сверх заголовка именуются по позиции
             row: dict[str, str] = {}
             for column, value in enumerate(values):
                 key = headers[column] if column < len(headers) else f"column_{column + 1}"
@@ -276,7 +281,8 @@ class PdfParser:
                 text = (page.extract_text() or "").strip()
                 image_b64 = None
                 # Порог, а не проверка на пустоту: у скана текстовый слой часто
-                # не пуст (колонтитул, OCR-штамп), но содержимое живёт в картинке.
+                # не пуст (колонтитул, OCR-штамп), но содержимое находится в
+                # растровом изображении.
                 # Длинный колонтитул проходит порог по тексту, поэтому вторым
                 # сигналом служит растр, покрывающий большую часть страницы
                 if len(text) < 40 or _page_is_mostly_image(page):
@@ -428,9 +434,9 @@ class PptxParser:
         fragments: list[SourceFragment] = []
         for slide_index, slide in enumerate(presentation.slides, start=1):
             # Один фрагмент на СЛАЙД: заголовок и все текстовые шейпы склеиваются
-            # переносом строки (заголовок и строки оглавления больше не плодят
-            # отдельные фрагменты). Слайд длиннее 3500 симв. режется, но короткие
-            # строки не живут поодиночке (merge_short_blocks).
+            # переносом строки (заголовок и строки оглавления не порождают
+            # отдельных фрагментов). Слайд длиннее 3500 симв. разбивается, но
+            # короткие строки не остаются отдельными фрагментами (merge_short_blocks).
             shape_texts = list(_slide_text_shapes(slide.shapes))
             slide_text = "\n".join(shape_texts).strip()
             block_index = 0
@@ -456,7 +462,7 @@ class PptxParser:
                             },
                         )
                     )
-            # Таблицы слайда — отдельными табличными фрагментами (как раньше)
+            # Таблицы слайда — отдельными табличными фрагментами
             for row_index, row_text in enumerate(_slide_table_rows(slide.shapes), start=1):
                 fragments.append(
                     SourceFragment(
@@ -554,7 +560,7 @@ def _unique_headers(raw: list[str]) -> list[str]:
 
 
 def _slug_id(value: str) -> str:
-    # Общий slug плюс фолбэк: имя листа из одних спецсимволов не даёт пустой id
+    # Общий slug с резервным значением: имя листа из одних спецсимволов не даёт пустой id
     return slug(value) or "sheet"
 
 

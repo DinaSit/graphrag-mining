@@ -5,6 +5,7 @@ import json
 import logging
 import mimetypes
 import os
+import threading
 from pathlib import Path
 from typing import Literal
 from urllib.parse import quote, urlsplit, urlunsplit
@@ -24,10 +25,12 @@ except ImportError as exc:  # pragma: no cover - helps local smoke tests without
 from app.file_storage import MinioFileStorage
 from app.jobs import IngestQueue
 from app.persistence import Neo4jSink, PostgresSink
+from app.pipeline import dyk
 from app.pipeline.query import QueryOrchestrator
 from app.pipeline.llm_bridge import LLM_CHAT_URL, LLMUnavailableError, SummaryStreamExtractor, chat_stream
 from app.schemas import (
     CandidateStatus,
+    DocumentStatus,
     DocumentVisibilityRequest,
     GraphPayload,
     QueryRequest,
@@ -59,7 +62,7 @@ store.hydrate_from_postgres()
 orchestrator = QueryOrchestrator(store)
 
 # Фоновая обработка загрузок: 2 воркера по умолчанию (лимит LLM-вызовов
-# держит сервис извлечения). INGEST_WORKERS=0 возвращает синхронный режим.
+# обеспечивает сервис извлечения). INGEST_WORKERS=0 возвращает синхронный режим.
 _workers = int(os.getenv("INGEST_WORKERS", "2"))
 ingest_queue = IngestQueue(store, workers=_workers) if _workers > 0 else None
 
@@ -89,7 +92,7 @@ def _llm_health() -> dict[str, str | None]:
 app = FastAPI(
     title="Scientific Multimodal GraphRAG",
     version="0.1.0",
-    description="Scientific document GraphRAG API with mock-first extraction interfaces.",
+    description="GraphRAG-энциклопедия по научным документам: инжест, граф знаний, ответы с цитатами.",
 )
 
 app.add_middleware(
@@ -101,7 +104,7 @@ app.add_middleware(
 )
 
 # UI — один статический файл backend/ui/index.html (контракт К1); каталог
-# создаётся параллельно другим агентом, его отсутствие не роняет API
+# может отсутствовать (поставляется отдельно), это не прерывает запуск API
 UI_DIR = ROOT_DIR / "backend" / "ui"
 if UI_DIR.is_dir():
     app.mount("/ui", StaticFiles(directory=str(UI_DIR), html=True), name="ui")
@@ -114,13 +117,20 @@ def root() -> RedirectResponse:
     return RedirectResponse(url="/ui/")
 
 
+@app.on_event("startup")
+async def _prewarm_dyk() -> None:
+    """Прогрев пула «Знаете ли вы?»: к первому визиту на главную формулировки
+    уже готовятся. Событие запускается с активным event loop (в отличие от
+    гидрации на импорте), поэтому asyncio-задачи ставятся штатно."""
+    dyk.warm_more(store, 8)
+
+
 @app.get("/health")
 def health() -> dict[str, str | None]:
     # last_error хранит последнюю ошибку каждого хранилища: сбой записи виден
     # в мониторинге, даже если сама операция уже отработала свой failed-путь
     payload = {
         "status": "ok",
-        "mode": "mock-first",
         "postgres": "enabled" if store.postgres_sink and store.postgres_sink.enabled else "memory",
         "postgres_last_error": store.postgres_sink.last_error if store.postgres_sink else None,
         "neo4j": "enabled" if store.graph_sink and store.graph_sink.enabled else "memory",
@@ -135,11 +145,48 @@ def health() -> dict[str, str | None]:
 
 class WebAnswerProxyRequest(BaseModel):
     question: str
+    # Реестр веб-источников из UI: [{"host": "elibrary.ru"}].
+    # Передаётся в ml-extraction без изменений; None — сервис использует
+    # собственный список источников по умолчанию
+    sources: list[dict] | None = None
 
 
 def _web_answer_failure(reason: str) -> dict:
     """Единый формат отказа /web/answer: та же схема, что успешный ответ."""
     return {"found": False, "answer": None, "url": None, "snippets": [], "llm_error": reason}
+
+
+# Кэш реестра веб-источников на процесс: список статичен между деплоями
+# (меняется только с пересборкой ml-extraction, а она перезапускает и backend)
+_web_sources_cache: list[dict] | None = None
+
+
+@app.get("/web/sources")
+async def web_sources() -> dict:
+    """Реестр веб-источников по умолчанию из ml-extraction (прокси /web_sources).
+
+    Единственный источник правды о площадках поиска — сервис ml; UI берёт
+    реестр отсюда и не дублирует серверные списки. Недоступный сервис →
+    пустой список: UI использует собственный встроенный резервный список.
+    """
+    global _web_sources_cache
+    if _web_sources_cache is not None:
+        return {"sources": _web_sources_cache}
+    web_answer_url = os.getenv("WEB_ANSWER_URL")
+    if not web_answer_url:
+        return {"sources": []}
+    url = web_answer_url.replace("/web_answer", "/web_sources")
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            raw = await client.get(url)
+        raw.raise_for_status()
+        sources = raw.json().get("sources") or []
+    except Exception as exc:
+        log.warning("Реестр веб-источников не получен из ml-extraction: %s", exc)
+        return {"sources": []}
+    if sources:
+        _web_sources_cache = sources
+    return {"sources": sources}
 
 
 @app.post("/web/answer")
@@ -151,12 +198,18 @@ async def web_answer(request: WebAnswerProxyRequest) -> dict:
     web_answer_url = os.getenv("WEB_ANSWER_URL")
     if not web_answer_url:
         return _web_answer_failure("веб-поиск не настроен (WEB_ANSWER_URL не задан)")
-    # Запас поверх WEB_ANSWER_TIMEOUT: ml-extraction должен успеть сам оборвать
-    # поиск/LLM по своему таймауту и вернуть структурированную ошибку
-    timeout = float(os.getenv("WEB_ANSWER_TIMEOUT", "20")) + 5.0
+    # Запас поверх WEB_ANSWER_TIMEOUT: ml-extraction должен успеть прервать
+    # поиск/LLM по собственному таймауту и вернуть структурированную ошибку.
+    # Правило цепочки: внешний бюджет = поиск (WEB_SEARCH_TIMEOUT) +
+    # LLM-каскад (WEB_LLM_TIMEOUT) + запас — значение по умолчанию согласовано
+    # с docker-compose.override.yml (8 + 45 + запас = 75)
+    timeout = float(os.getenv("WEB_ANSWER_TIMEOUT", "75")) + 5.0
     try:
+        body: dict = {"question": request.question}
+        if request.sources is not None:
+            body["sources"] = request.sources
         async with httpx.AsyncClient(timeout=timeout) as client:
-            raw = await client.post(web_answer_url, json={"question": request.question})
+            raw = await client.post(web_answer_url, json=body)
         raw.raise_for_status()
         payload = raw.json()
         if not isinstance(payload, dict):
@@ -178,8 +231,8 @@ async def web_answer(request: WebAnswerProxyRequest) -> dict:
 
 @app.post("/ask")
 async def ask(request: QueryRequest):
-    # Смолток и оффтоп («как дела?») отвечаются мгновенно, без LLM,
-    # графа и эмбеддингов
+    # Разговорные вопросы и вопросы вне предметной области («как дела?»)
+    # отвечаются мгновенно, без LLM, графа и эмбеддингов
     if orchestrator.is_offtopic(request.question):
         return orchestrator.offtopic_response()
     return await orchestrator.answer(request)
@@ -192,7 +245,7 @@ def _sse_event(name: str, payload: dict) -> str:
 
 def _parse_llm_json(text: str) -> dict:
     """Полный текст стрима -> dict как из /chat_json: модель может обернуть
-    JSON в код-блок или добавить хвост вокруг объекта."""
+    JSON в код-блок или добавить сопутствующий текст вокруг объекта."""
     candidate = text.strip()
     if candidate.startswith("```"):
         candidate = candidate.strip("`").lstrip("json").strip()
@@ -211,16 +264,18 @@ def _parse_llm_json(text: str) -> dict:
 
 async def _ask_stream_events(request: QueryRequest):
     """SSE-поток контракта К1: "evidence" -> "delta"... -> "final" (всегда последним)."""
-    # Оффтоп: сразу единственное событие final
+    # Вопрос вне предметной области: сразу единственное событие final
     if orchestrator.is_offtopic(request.question):
         yield _sse_event("final", orchestrator.offtopic_response().model_dump(mode="json"))
         return
 
+    # Конвейер orchestrator.answer() развёрнут здесь по шагам — отсюда обращения
+    # к его приватным методам: между этапами нужно вставлять SSE-события
     try:
         evidence = await orchestrator._collect_evidence(request)
         yield _sse_event("evidence", orchestrator.evidence_preview(evidence))
 
-        # Дельты наружу — только текст summary: автомат вытаскивает значение
+        # Дельты наружу — только текст summary: автомат извлекает значение
         # первого ключа из сырого JSON-потока модели
         extractor = SummaryStreamExtractor()
         full_text = ""
@@ -264,8 +319,8 @@ async def _ask_stream_events(request: QueryRequest):
 
 @app.post("/ask/stream")
 async def ask_stream(request: QueryRequest):
-    """Стриминговый вариант /ask (контракт К1): тот же оффтоп-роутер,
-    но summary отдаётся кусками по мере генерации."""
+    """Стриминговый вариант /ask (контракт К1): та же обработка вопросов вне
+    предметной области, но summary отдаётся частями по мере генерации."""
     return StreamingResponse(_ask_stream_events(request), media_type="text/event-stream")
 
 
@@ -308,17 +363,45 @@ def job_status(job_id: str):
 
 
 @app.get("/facts/random")
-def random_fact():
-    """Один случайный approved-факт из нескрытого документа (фича UI)."""
-    fact = store.random_visible_fact()
+async def random_fact():
+    """Один случайный approved-факт из нескрытого документа (функция UI).
+
+    Контракт «Знаете ли вы?»: когда LLM-формулировка факта готова (кэш dyk),
+    в ответ дополнительно идут поля "teaser" и "question"; иначе ответ прежней
+    формы, а генерация ставится фоновой задачей — главная не ждёт LLM.
+    """
+    # dyk.pick предпочитает уже подготовленный факт (главная страница почти
+    # всегда получает готовую формулировку) и параллельно запускает фоновый
+    # прогрев пула; холодный старт — показ без формулировки + фоновая генерация
+    fact, phrased = dyk.pick(store)
     if fact is None:
         raise HTTPException(status_code=404, detail="Нет ни одного подходящего факта")
-    return {"fact": fact.model_dump(mode="json")}
+    payload = {"fact": fact.model_dump(mode="json")}
+    if phrased is not None:
+        # Поля контракта — в корне ответа; зеркалируются в fact, потому что UI
+        # читает teaser/question с самого объекта факта (fillDyk в index.html)
+        payload["fact"].update(phrased)
+        payload.update(phrased)
+    return payload
 
 
 @app.get("/documents")
 def list_documents():
-    return list(store.documents.values())
+    """Документы + счётчики для досье: фактов и уникальных экспериментов
+    по каждому документу (по source.document_id одобренных фактов)."""
+    facts_by_doc: dict[str, int] = {}
+    experiments_by_doc: dict[str, set] = {}
+    for fact in list(store.facts.values()):
+        doc_id = fact.source.document_id
+        facts_by_doc[doc_id] = facts_by_doc.get(doc_id, 0) + 1
+        experiments_by_doc.setdefault(doc_id, set()).add(fact.experiment_id)
+    out = []
+    for document in list(store.documents.values()):
+        entry = document.model_dump(mode="json")
+        entry["facts_count"] = facts_by_doc.get(document.id, 0)
+        entry["experiments_count"] = len(experiments_by_doc.get(document.id, ()))
+        out.append(entry)
+    return out
 
 
 @app.get("/documents/{document_id}")
@@ -326,9 +409,7 @@ def get_document(document_id: str):
     document = store.documents.get(document_id)
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
-    # list(): фрагменты добавляются из фоновых воркеров параллельно
-    fragments = [fragment for fragment in list(store.fragments.values()) if fragment.document_id == document_id]
-    return {"document": document, "fragments": fragments}
+    return {"document": document, "fragments": store.fragments_of(document_id)}
 
 
 @app.get("/documents/{document_id}/original")
@@ -353,10 +434,11 @@ def get_document_original(document_id: str):
     if is_pdf:
         media_type = "application/pdf"
     disposition = "inline" if is_pdf else "attachment"
-    # RFC 5987: кириллическое имя — в filename*, ASCII-фолбэк — в filename.
-    # Имя файла не должно ломать заголовок: управляющие символы и '/'
-    # выбрасываются, кавычки и бэкслеши в quoted-string экранируются,
-    # в filename* quote(..., safe="") кодирует всё вне attr-char
+    # RFC 5987: кириллическое имя — в filename*, ASCII-вариант — резервное
+    # значение в filename. Имя файла не должно нарушать синтаксис заголовка:
+    # управляющие символы и '/' удаляются, кавычки и обратные косые черты
+    # в quoted-string экранируются, в filename* quote(..., safe="") кодирует
+    # всё вне attr-char
     clean_name = "".join(ch for ch in filename if ch.isprintable() and ch != "/") or "document"
     ascii_name = clean_name.encode("ascii", "ignore").decode() or "document"
     ascii_name = ascii_name.replace("\\", "\\\\").replace('"', '\\"')
@@ -381,6 +463,35 @@ def get_document_preview(document_id: str):
         media_type="application/pdf",
         headers={"Content-Disposition": 'inline; filename="preview.pdf"'},
     )
+
+
+@app.post("/documents/{document_id}/reprocess")
+def reprocess_document_endpoint(document_id: str):
+    """Повторная обработка документа через LLM: пере-извлечение кандидатов по
+    сохранённым фрагментам (отклонённые экспертом кандидаты не перезаписываются)
+    + переоценка типа/научности/года. Идёт через общую очередь инжеста — число
+    воркеров ограничивает параллельные LLM-вызовы; ответ немедленный, прогресс виден
+    по статусу документа: processing → completed | failed."""
+    document = store.documents.get(document_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if document.status == DocumentStatus.processing:
+        # уже обрабатывается (инжест или предыдущая перезагрузка) — не дублируем
+        return {"status": "processing", "document_id": document_id}
+    if ingest_queue is not None:
+        job_id = ingest_queue.enqueue_reprocess(document_id)
+        return {"status": "queued", "document_id": document_id, "job_id": job_id}
+
+    # синхронный режим (INGEST_WORKERS=0): очереди нет — фоновый поток
+    def run() -> None:
+        try:
+            store.reprocess_document(document_id)
+            store.refresh_document_traits(document_id)
+        except Exception:
+            log.exception("Повторная обработка документа %s не удалась", document_id)
+
+    threading.Thread(target=run, daemon=True, name=f"reprocess-{document_id[:8]}").start()
+    return {"status": "processing", "document_id": document_id}
 
 
 @app.post("/documents/{document_id}/visibility")
@@ -436,7 +547,7 @@ def approve_fact(candidate_id: str):
 def reject_fact(candidate_id: str, body: RejectFactRequest | None = Body(default=None)):
     if candidate_id not in store.candidates:
         raise HTTPException(status_code=404, detail="Candidate not found")
-    # Тело необязательно: старые клиенты шлют reject без note
+    # Тело необязательно: старые клиенты отправляют reject без note
     return store.reject_candidate(candidate_id, note=body.note if body else None)
 
 
