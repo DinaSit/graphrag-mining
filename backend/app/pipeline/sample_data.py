@@ -88,7 +88,7 @@ def _build_experiments() -> list[dict[str, object]]:
             prop = PROPERTIES[(material_index + temp_index) % len(PROPERTIES)]
             # Сценарий «пика старения» для Сплава X: твёрдость растёт при 720 °C
             # и падает при 735 °C — физически согласованная пара, которую детектор
-            # противоречий обязан НЕ считать противоречием (_comparable_conditions
+            # противоречий обязан НЕ считать противоречием (answer_analysis.comparable_conditions
             # в query.py)
             if material == "Сплав X" and temp in {705, 720, 735}:
                 prop = "твёрдость"

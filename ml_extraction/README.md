@@ -74,7 +74,6 @@ scripts/
   probe_api.py            диагностика API: чат, JSON-формат, vision, эмбеддинги
   run_corpus.py           извлечение по папке документов → JSON в results/
   load_corpus.py          загрузка корпуса в базу знаний через /ingest backend
-tests/                    5 файлов, 50 тестов; сеть замещена httpx.MockTransport
 ```
 
 ## Запуск
@@ -92,14 +91,6 @@ cd ml_extraction
 pip install -r requirements.txt
 set -a; source ../.env; set +a
 uvicorn app.main:app --port 8002
-```
-
-Тесты — в отдельном контейнере (pytest в образ не входит):
-
-```bash
-docker compose run --rm --no-deps -T \
-  -v "$PWD/ml_extraction/tests:/srv/tests" \
-  ml-extraction sh -c "pip install -q pytest pytest-asyncio; python -m pytest tests -q"
 ```
 
 Веса bge-m3 (~2,3 ГБ) скачиваются при первом обращении и сохраняются в томе

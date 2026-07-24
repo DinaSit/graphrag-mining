@@ -272,7 +272,7 @@ async def _ask_stream_events(request: QueryRequest):
     # Конвейер orchestrator.answer() развёрнут здесь по шагам — отсюда обращения
     # к его приватным методам: между этапами нужно вставлять SSE-события
     try:
-        evidence = await orchestrator._collect_evidence(request)
+        evidence = await orchestrator.collect_evidence(request)
         yield _sse_event("evidence", orchestrator.evidence_preview(evidence))
 
         # Дельты наружу — только текст summary: автомат извлекает значение
@@ -280,7 +280,7 @@ async def _ask_stream_events(request: QueryRequest):
         extractor = SummaryStreamExtractor()
         full_text = ""
         stream_error: LLMUnavailableError | None = None
-        async for event in chat_stream(orchestrator._answer_messages(request.question, evidence.evidence_pack)):
+        async for event in chat_stream(orchestrator.answer_messages(request.question, evidence.evidence_pack)):
             if event.get("done"):
                 full_text = event.get("text") or ""
                 stream_error = event.get("error")
@@ -300,7 +300,7 @@ async def _ask_stream_events(request: QueryRequest):
             except ValueError as exc:
                 evidence.llm_errors.append(LLMUnavailableError("bad_response", str(exc)).human())
 
-        response = orchestrator._finalize(evidence, llm_answer)
+        response = orchestrator.finalize(evidence, llm_answer)
         yield _sse_event("final", response.model_dump(mode="json"))
     except Exception as exc:  # финальное событие обязано прийти даже при сбое пайплайна
         fallback = QueryResponse(

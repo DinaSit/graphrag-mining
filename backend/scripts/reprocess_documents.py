@@ -39,7 +39,7 @@ def set_status(store: ApplicationStore, document_id: str, status: DocumentStatus
     document.status = status
     document.element_count = element_count
     version.status = status
-    store._persist_document(document, version)
+    store.persist_document(document, version)
 
 
 def reprocess_document(store: ApplicationStore, document_id: str, chunk_size: int) -> tuple[int, int]:

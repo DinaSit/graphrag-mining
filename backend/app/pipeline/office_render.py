@@ -7,6 +7,10 @@ import tempfile
 
 logger = logging.getLogger(__name__)
 
+# Форматы, для которых при инжесте строится PDF-превью (LibreOffice уже в образе).
+# PDF рендерится браузером как есть, у прочих форматов превью нет
+PREVIEW_SOURCE_EXTENSIONS = frozenset({".docx", ".docm", ".pptx"})
+
 
 def convert_office_to_pdf(content: bytes, suffix: str, timeout: float = 40) -> bytes | None:
     """Конвертирует офисный файл (DOCX/DOCM/PPTX) в PDF через headless LibreOffice.

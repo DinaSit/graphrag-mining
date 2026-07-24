@@ -19,6 +19,18 @@ def slug(value: str) -> str:
     return "-".join(part for part in cleaned.split("-") if part)
 
 
+def index_token(token: str, exact: set[str], prefixes: set[str]) -> None:
+    """Единое правило индексации термина: токен до 4 букв — в точные совпадения,
+    длиннее — 5-буквенный префикс (покрывает морфологические формы). Общая точка
+    для словаря доменной лексики (query_routing) и пословного матчинга фактов
+    (fact_selection) — правила обязаны совпадать, иначе маршрутизация вопросов
+    вне предметной области и матчинг перестанут быть согласованными."""
+    if len(token) <= 4:
+        exact.add(token)
+    else:
+        prefixes.add(token[:5])
+
+
 def float_or_none(value: Any) -> float | None:
     """Число из сырого значения LLM/таблицы: None/'' → None, запятая → точка,
     неразборчивое → None. Общая для storage-, providers- и validation-слоёв."""
@@ -63,13 +75,20 @@ def normalize_effect_direction(value: Any) -> str:
 
 
 # Значения-заглушки в подписях КГ: единый список для гигиены данных у источника
-# (clean_extracted), для подписей узлов графа (_is_junk_label в storage.py)
-# и для удаления таких узлов из Neo4j (_cleanup_junk_nodes). trim/casefold/ё→е.
+# (clean_extracted), для подписей узлов графа (is_junk_label) и для удаления
+# таких узлов из Neo4j (_cleanup_junk_nodes). trim/casefold/ё→е.
 JUNK_VALUES = frozenset({
     "", "не указано", "unknown", "n/a", "-", "нет данных", "none", "null",
-    # значения по умолчанию при извлечении (см. _fact_from_candidate / _is_missing_value)
+    # значения по умолчанию при извлечении (см. fact_from_candidate)
     "unknown material", "unknown property", "unknown process", "unknown lab",
 })
+
+
+def is_junk_label(value: str | None) -> bool:
+    """Является ли значение заглушкой (JUNK_VALUES). Проверка подписи, в отличие
+    от clean_extracted, ничего не преобразует — нужна там, где решается, создавать
+    ли узел графа и считать ли поле кандидата извлечённым."""
+    return str(value or "").strip().casefold().replace("ё", "е") in JUNK_VALUES
 
 
 def clean_extracted(value: str | None) -> str:

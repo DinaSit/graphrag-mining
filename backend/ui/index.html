@@ -472,10 +472,13 @@
   .docs .dright{margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
   .docs .dlbl{font-size:12.5px;color:var(--w-dim)}
   /* единый вид всех контролов панели: одна обводка, радиус, высота; нативный
-     селект лишается системной отрисовки, стрелка — собственная, как у выпадающего списка типов */
+     селект лишается системной отрисовки, стрелка — собственная, как у выпадающего списка типов.
+     Ширина фиксирована (box-sizing:border-box), поэтому при смене значения контрол не
+     растягивается: не поместившийся текст обрезается многоточием (text-overflow) */
   .docs .dsel{background:transparent;border:1px solid var(--w-line2);border-radius:16px;
     color:var(--w-mut);font-size:12.5px;padding:4px 26px 4px 12px;cursor:pointer;
-    appearance:none;-webkit-appearance:none;
+    appearance:none;-webkit-appearance:none;box-sizing:border-box;width:120px;height:30px;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
     background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2393a0ad' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
     background-repeat:no-repeat;background-position:right 9px center;background-size:11px}
   .docs .dsel:hover{border-color:var(--w-link);color:var(--w-body)}
@@ -490,6 +493,10 @@
      фоновая (из .dsel) отключается, иначе стрелка дублируется */
   .docs .dd{position:relative}
   .docs .ddbtn{display:inline-flex;align-items:center;gap:6px;padding-right:12px;background-image:none}
+  /* фиксированная ширина кнопки типа делится между текстом и стрелкой: текст
+     занимает остаток и обрезается многоточием, стрелка не сжимается */
+  .docs .ddbtn > span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .docs .ddbtn > svg{flex:none}
   .docs .ddpop{display:none;position:absolute;top:calc(100% + 6px);right:0;z-index:8;
     background:var(--w-panel);border:1px solid var(--w-line2);border-radius:9px;
     padding:6px;min-width:170px;box-shadow:0 8px 22px rgba(0,0,0,.35)}

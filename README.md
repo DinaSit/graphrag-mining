@@ -158,9 +158,14 @@ backend/
   app/persistence.py          адаптеры PostgreSQL и Neo4j
   app/file_storage.py         адаптер MinIO
   app/ml_mock.py              заглушка сервиса извлечения
-  app/pipeline/               парсеры, PDF-превью (office_render), признаки
-                              документов (document_traits), валидация, LLM-мост,
-                              QueryOrchestrator, рубрика «Знаете ли вы?» (dyk)
+  app/pipeline/               шаги обработки и ответа: парсеры, PDF-превью
+                              (office_render), признаки документов
+                              (document_traits), валидация, LLM-мост,
+                              восстановление состояния (hydration), проекция
+                              графа (graph_view), сборка факта (fact_builder),
+                              оркестратор ответа (query) и его шаги —
+                              маршрутизация, отбор фактов, обход графа,
+                              evidence pack, цитаты, аналитика
   ui/index.html               веб-интерфейс «Графа» (один файл, без сборки;
                               просмотрщик pdf.js устанавливается при сборке образа)
   migrations/001_init.sql     схема PostgreSQL + pgvector
