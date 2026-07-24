@@ -396,13 +396,15 @@ class PostgresSink:
         при старте — система выглядит рабочей, при этом часть фактов потеряна
         без каких-либо признаков сбоя.
         """
-        state: dict[str, dict[str, Any]] = {
+        state: dict[str, Any] = {
             "documents": {},
             "versions": {},
             "fragments": {},
             "candidates": {},
             "facts": {},
-            "vectors": {},
+            # Только идентификаторы: сами векторы остаются в таблице и в память
+            # не поднимаются — близость по ним считает pgvector (search_vectors)
+            "vectorized_fragment_ids": set(),
         }
         if not self.enabled:
             return state
@@ -458,9 +460,8 @@ class PostgresSink:
                             continue
                         state["facts"][row[0]] = _fact_from_row(row)
 
-                    cursor.execute("SELECT fragment_id, embedding FROM fragment_vectors WHERE embedding IS NOT NULL")
-                    for row in cursor.fetchall():
-                        state["vectors"][row[0]] = json.loads(str(row[1]))
+                    cursor.execute("SELECT fragment_id FROM fragment_vectors WHERE embedding IS NOT NULL")
+                    state["vectorized_fragment_ids"].update(row[0] for row in cursor.fetchall())
         except Exception as exc:
             self.last_error = str(exc)
             log.error("PostgreSQL: восстановление состояния не выполнено: %s", exc)

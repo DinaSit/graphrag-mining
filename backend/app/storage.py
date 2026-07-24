@@ -96,7 +96,11 @@ class ApplicationStore:
         self.fragments: dict[str, SourceFragment] = {}
         self.candidates: dict[str, ExtractionCandidate] = {}
         self.facts: dict[str, Fact] = {}
-        self.fragment_vectors: dict[str, list[float]] = {}
+        # Идентификаторы фрагментов, у которых эмбеддинг посчитан. Сами векторы
+        # хранит PostgreSQL (таблица fragment_vectors) — близость считает pgvector
+        # своим индексом, в память они не поднимаются; здесь нужен только ответ
+        # на вопрос «у этого фрагмента вектор уже есть?» для дозаполнения при старте
+        self.vectorized_fragment_ids: set[str] = set()
         # Дедуп по checksum: проверка и регистрация документа атомарны,
         # иначе два ingest-воркера создают дубликаты одного файла
         self._ingest_lock = threading.Lock()
@@ -252,7 +256,7 @@ class ApplicationStore:
 
             for fid in fragment_ids:
                 self.fragments.pop(fid, None)
-                self.fragment_vectors.pop(fid, None)
+                self.vectorized_fragment_ids.discard(fid)
             for cid in candidate_ids:
                 self.candidates.pop(cid, None)
             for fid in fact_ids:
@@ -574,10 +578,10 @@ class ApplicationStore:
             vectors = self.embedder.embed([fragment.normalized_text for fragment in chunk])
             new_vectors: dict[str, list[float]] = {}
             for fragment, vector in zip(chunk, vectors):
-                self.fragment_vectors[fragment.id] = vector
                 new_vectors[fragment.id] = vector
             if self.postgres_sink:
                 self.postgres_sink.upsert_vectors(new_vectors, self.embedder.name)
+            self.vectorized_fragment_ids.update(new_vectors)
 
     def search(self, query: str, top_k: int = 8) -> list[SearchHit]:
         if not self.postgres_sink or not self.postgres_sink.enabled:

@@ -34,7 +34,7 @@ def hydrate(store: ApplicationStore) -> None:
     store.fragments.update(state["fragments"])
     store.candidates.update(state["candidates"])
     store.facts.update(state["facts"])
-    store.fragment_vectors.update(state["vectors"])
+    store.vectorized_fragment_ids.update(state["vectorized_fragment_ids"])
     # Признаки документов, загруженных до появления эвристики, дополняются
     # синхронно: расчёт по фрагментам в памяти, объём — единицы документов.
     # Группировка фрагментов по документу делается один раз на оба бэкфила,
@@ -54,7 +54,7 @@ def hydrate(store: ApplicationStore) -> None:
         _in_background(classify_documents_llm, "classify-docs", store, fragments_by_document)
     # Фрагменты без векторов (например, после смены модели эмбеддингов)
     # индексируются заново в фоне: старт backend не блокируется
-    missing = [fragment for fid, fragment in store.fragments.items() if fid not in store.fragment_vectors]
+    missing = [fragment for fid, fragment in store.fragments.items() if fid not in store.vectorized_fragment_ids]
     if missing:
         _in_background(reindex_missing, "reindex-missing", store, missing)
     # DOCX/PPTX, загруженные до появления PDF-превью, конвертируются в фоне
