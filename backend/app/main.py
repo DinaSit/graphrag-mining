@@ -103,8 +103,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# UI — один статический файл backend/ui/index.html (контракт К1); каталог
-# может отсутствовать (поставляется отдельно), это не прерывает запуск API
+# UI — статика backend/ui: index.html, styles.css и ES-модули js/ (сборки нет,
+# модули загружает браузер); каталог может отсутствовать (поставляется
+# отдельно), это не прерывает запуск API
 UI_DIR = ROOT_DIR / "backend" / "ui"
 if UI_DIR.is_dir():
     app.mount("/ui", StaticFiles(directory=str(UI_DIR), html=True), name="ui")

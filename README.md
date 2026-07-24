@@ -166,8 +166,10 @@ backend/
                               оркестратор ответа (query) и его шаги —
                               маршрутизация, отбор фактов, обход графа,
                               evidence pack, цитаты, аналитика
-  ui/index.html               веб-интерфейс «Графа» (один файл, без сборки;
-                              просмотрщик pdf.js устанавливается при сборке образа)
+  ui/                         веб-интерфейс «Графа» без сборки: index.html —
+                              разметка, styles.css — оформление, js/ —
+                              ES-модули (точка входа js/main.js); просмотрщик
+                              pdf.js устанавливается при сборке образа
   migrations/001_init.sql     схема PostgreSQL + pgvector
   scripts/                    seed_sample_data.py, reprocess_documents.py
 ml_extraction/                сервис извлечения: /extract, /embed, /chat_json,
