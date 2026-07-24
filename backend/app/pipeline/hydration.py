@@ -47,10 +47,6 @@ def hydrate(store: ApplicationStore) -> None:
     # Значения-заглушки ('не указано', 'unknown'…) в ранее сохранённых фактах
     # очищаются в хранимых полях единожды при старте (идемпотентно)
     backfill_junk_facts(store)
-    # Вердикты прежней маркерной эвристики научности аннулируются: научность
-    # определяет LLM с обоснованием (doc_type=None — признак необходимости
-    # доклассификации), до её ответа значение остаётся пустым (прочерк)
-    void_legacy_scientific(store)
     # Тип и научность (LLM по титульнику) — в фоне: вызовы медленные,
     # старт не блокируется; документы без вердикта дооцениваются здесь же
     # при каждом старте, пока LLM не ответит
@@ -92,23 +88,6 @@ def backfill_document_traits(
         if not fragments:
             continue
         document.origin = detect_origin(fragments)
-        store.persist_document_quiet(document)
-
-
-def void_legacy_scientific(store: ApplicationStore) -> None:
-    """Сбрасывает is_scientific, посчитанный старой маркерной эвристикой.
-
-    Документ с doc_type=None ещё не проходил LLM-классификацию — его
-    научность из прежней эвристики (без обоснования) недействительна.
-    Идемпотентно: после сброса is_scientific уже None, после классификации
-    doc_type задан — повторный старт ничего не трогает.
-    TODO: удалить после первого прод-запуска — для новых данных
-    предусловие не возникает, блок станет мёртвым грузом.
-    """
-    for document in list(store.documents.values()):
-        if document.doc_type is not None or document.is_scientific is None:
-            continue
-        document.is_scientific = None
         store.persist_document_quiet(document)
 
 
