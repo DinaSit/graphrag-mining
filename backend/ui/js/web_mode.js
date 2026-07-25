@@ -35,7 +35,7 @@ export function applyWebMode(st){
     btn.classList.toggle('on', on);
     btn.setAttribute('aria-pressed', on ? 'true' : 'false');
   }
-  for (const id of ['art-meta', 'sec-ans', 'sec-rest', 'skels']){
+  for (const id of ['sec-ans', 'sec-rest', 'skels']){
     const n = document.getElementById(id);
     if (n) n.hidden = on;
   }
@@ -46,7 +46,7 @@ export function applyWebMode(st){
     web.hidden = !on;
     if (on) paintWebMode(st);
   }
-  // карточка «Об ответе» и чипы меняют содержимое по режиму: метрики базы ↔ веб-источники
+  // карточка «О статье» и чипы меняют содержимое по режиму: метрики базы ↔ веб-источники
   paintInfobox(st);
   paintChips(st);
   hideFnpop();

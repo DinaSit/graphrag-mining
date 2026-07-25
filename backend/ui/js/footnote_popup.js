@@ -1,5 +1,6 @@
 import { $, clear, el, wrapQuote } from './dom.js';
-import { S, docName, fragLoc, sciLabel } from './state.js';
+import { S, docInfo, docName } from './state.js';
+import { sciWord } from './view_docs.js';
 import { openSources } from './view_sources.js';
 
 // ==================================================================
@@ -18,10 +19,10 @@ export function showFnpop(refEl){
     pop.append(el('div', 'd', docName(note.ref.document_id)));
     if (note.quote) pop.append(el('q', null, wrapQuote(note.quote, 300)));
     const ft = el('div', 'ft');
-    const locBits = [fragLoc(note.ref.document_id, note.ref.page)];
-    const sci = sciLabel(note.ref.document_id);
-    if (sci) locBits.push(sci);
-    ft.append(el('span', null, locBits.join(' · ')));
+    // в подписи сноски — только признак научности источника
+    const doc = docInfo(note.ref.document_id);
+    const sci = doc && doc.is_scientific != null ? sciWord(doc.is_scientific) : '';
+    ft.append(el('span', null, sci));
     const open = el('button', null, 'открыть источник →');
     open.addEventListener('click', () => { hideFnpop(); openSources(note.id); });
     ft.append(open);

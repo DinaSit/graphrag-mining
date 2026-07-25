@@ -1,4 +1,4 @@
-import { displayGraph, respOf, srcTotal, uniqueDocsCount } from './article_stream.js';
+import { displayGraph, respOf, usedDocsCount } from './article_stream.js';
 import { ask } from './ask.js';
 import { appendRich, noteForSource, richParagraphs, splitPending, supFor } from './citations.js';
 import { $, REDUCED, clear, el, extLink, pct, trunc, wrapQuote } from './dom.js';
@@ -6,7 +6,6 @@ import { graphSVG, openGraphOverlay } from './graph.js';
 import { routeName } from './router.js';
 import { POPULAR, S, docName, docYear, fragLoc, sciLabel } from './state.js';
 import { _SVG_TRASH, dockBtn } from './view_docs.js';
-import { plural } from './view_home.js';
 import { openSources } from './view_sources.js';
 import { hostOf, isWebSrcFormOpen, paintToc, setWebSrcFormOpen, snippetUrl, webSourcesRoster, webSrcOverrides, webSrcSave, webSrcUsed, webUsedKeys } from './web_mode.js';
 
@@ -154,45 +153,16 @@ window.addEventListener('resize', () => {
   scheduleSpy();
 });
 
-export function paintMeta(st){
-  const meta = $('#art-meta');
-  if (!meta) return;
-  clear(meta);
-  const r = respOf(st);
-  const nDocs = uniqueDocsCount(st);
-  if (nDocs){
-    const b = el('button', 'mlink', 'Собрано по ' + nDocs + ' ' + plural(nDocs, 'документу', 'документам', 'документам') + ' корпуса');
-    b.addEventListener('click', () => openSources(null));
-    meta.append(b);
-    meta.append(' · ');
-  }
-  // ссылка на граф-оверлей активна, только когда графу есть что показать; при пустом
-  // графе (nodes 0 — например, «косвенный» финал обнулил graph) — обычный приглушённый
-  // текст без подчёркивания и клика. Состояние пересчитывается на каждом paintMeta
-  // (evidence и final): к финалу граф может опустеть.
-  const modeText = r.pipeline_mode === 'fast' ? 'быстрый ответ по фрагментам' : 'полный разбор с графом';
-  if (displayGraph(st).graph.nodes.length){
-    const mode = el('button', 'mlink', modeText);
-    mode.addEventListener('click', () => openGraphOverlay(st));
-    meta.append(mode);
-  } else {
-    meta.append(el('span', null, modeText));
-  }
-  // готовый ответ суффикса не получает: фактического таймстемпа обновления в данных
-  // нет; во время генерации выводится статус генерации
-  if (st.phase !== 'done') meta.append(' · собирается сейчас');
-  paintChips(st); // чипы обновляются в те же моменты, что мета-строка (evidence и final)
-}
 
 // Чипы метрик для узкого экрана (≤980px): те же значения, что в карточке
-// «Об ответе», размещённые одной строкой под заголовком. Видимость управляется CSS —
+// «О статье», размещённые одной строкой под заголовком. Видимость управляется CSS —
 // рисуем всегда, показывается только когда карточка и мета-строка скрыты
 export function paintChips(st){
   const wrap = $('#art-chips');
   if (!wrap) return;
   clear(wrap);
   // веб-режим: метрики базового ответа здесь не соответствовали бы содержимому — вместо них один чип
-  // с числом источников реестра (то же, что мини-таблица в карточке «Об ответе»)
+  // с числом источников реестра (то же, что мини-таблица в карточке «О статье»)
   if (st.webMode){
     const c = el('span', 'chip');
     const n = String(webSourcesRoster().length);
@@ -219,9 +189,7 @@ export function paintChips(st){
   };
   chip('уверенность', has && r.confidence != null ? pct(r.confidence) : '—');
   chip('научность', has && r.scientific_share != null ? pct(r.scientific_share) : '—');
-  const srcCount = srcTotal(st, r);
-  const src = chip('источники', has ? String(srcCount) : '—');
-  if (has && srcCount > 0) activate(src, () => openSources(null), 'link');
+  chip('документы', has ? String(usedDocsCount(st, r)) : '—');
   const dg = displayGraph(st);
   const g = dg.graph;
   const gChip = chip(dg.related ? 'граф смежных' : 'граф',
@@ -297,7 +265,8 @@ export function paintInfobox(st){
   const box = $('#infobox');
   if (!box) return;
   clear(box);
-  const ih = el('div', 'ih', 'Об ответе');
+  // заголовок зависит от режима: метрики статьи ↔ реестр веб-площадок
+  const ih = el('div', 'ih', st.webMode ? 'Ресурсы' : 'О статье');
   box.append(ih);
   // веб-режим: вместо метрик базы — РЕЕСТР веб-источников системы (весь список
   // площадок поиска, не источники конкретного ответа): кликабельные названия
@@ -312,7 +281,7 @@ export function paintInfobox(st){
       if (inp) inp.focus();
     };
     const t = el('table', 'dlist');
-    const head = el('tr');
+    const head = el('tr', 'addrow');
     const thAdd = el('th');
     const addBtn = el('button', 'addlbl', 'Добавить');
     addBtn.addEventListener('click', toggleForm);
@@ -370,18 +339,10 @@ export function paintInfobox(st){
   addRow('Уверенность', confKnown ? pct(r.confidence) : '—', confKnown ? 'conf' : 'na');
   const sciKnown = has && r.scientific_share != null;
   addRow('Научность', sciKnown ? pct(r.scientific_share) : '—', sciKnown ? 'sci' : 'na');
-  const srcCount = srcTotal(st, r);
-  // «Источники» кликабельны, только когда источников > 0: ведут на тот же #/sources,
-  // что и мета-ссылка «Собрано по N документам корпуса»; при 0 — инертная строка
-  const srcRow = addRow('Источники', has ? String(srcCount) : '—', has ? null : 'na');
-  if (has && srcCount > 0){
-    srcRow.classList.add('lnk');
-    srcRow.setAttribute('role', 'link');
-    srcRow.tabIndex = 0;
-    const openSrc = () => openSources(null);
-    srcRow.addEventListener('click', openSrc);
-    srcRow.addEventListener('keydown', e => { if (e.key === 'Enter') openSrc(); });
-  }
+  // «Документы» — сколько РАЗНЫХ документов дали материал для ответа; в отличие от
+  // числа сносок внизу статьи это счёт по документам, а не по фрагментам
+  const docCount = usedDocsCount(st, r);
+  addRow('Документы', has ? String(docCount) : '—', has ? null : 'na');
   const dg = displayGraph(st);
   const g = dg.graph;
   addRow('Узлы / связи',
@@ -489,7 +450,7 @@ export function paintFinalSections(st){
   }
   paintToc(st);
   paintInfobox(st);
-  paintMeta(st);
+  paintChips(st);
 }
 
 export function snippetEl(sn, primary){
@@ -498,13 +459,14 @@ export function snippetEl(sn, primary){
   const url = snippetUrl(sn);
   const title = sn.title || url || 'источник';
   const body = sn.snippet || sn.body || sn.text || '';
+  // бейдж основного источника открывает строку — читается раньше названия
+  if (primary) d.append(el('span', 'primetag', 'основной'));
   if (url){
     d.append(extLink(url, trunc(title, 90)));
   } else d.append(el('b', null, trunc(title, 90)));
   // год публикации из научных API (контракт «год статьи»): year или date рядом с заголовком
   const yr = sn.year != null ? sn.year : sn.date;
   if (yr != null && String(yr) !== '') d.append(el('span', 'yr', ' · ' + yr));
-  if (primary) d.append(el('span', 'primetag', 'основной')); // бейдж основного источника
   if (body){ d.append(document.createElement('br')); d.append(document.createTextNode(trunc(body, 220))); }
   // Маршрут к полному тексту для источников с DOI: официальная страница —
   // ссылка заголовка (шаг 1, там нередко open access); платный доступ → ResearchGate

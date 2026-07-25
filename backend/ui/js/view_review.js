@@ -1,6 +1,5 @@
 import { $, apiJSON, clear, el, trunc, wrapQuote } from './dom.js';
 import { docName, docsCache, fragLoc, loadDocs } from './state.js';
-import { takeReviewDocPreset } from './view_docs.js';
 import { plural } from './view_home.js';
 
 // ==================================================================
@@ -22,8 +21,7 @@ export function viewReview(view){
   view.append(wrap);
   list.append(el('div', 'rempty', 'Загрузка…'));
 
-  // docId может прийти пресетом из досье документа (кликабельные счётчики)
-  const RV = { items: [], selected: new Set(), sortDir: 'desc', docId: takeReviewDocPreset(), minConf: 0, shown: REVIEW_PAGE, busy: false };
+  const RV = { items: [], selected: new Set(), sortDir: 'desc', docId: '', minConf: 0, shown: REVIEW_PAGE, busy: false };
   let selAllCb, cntEl, okAllBtn, noAllBtn;
 
   // фильтры и сортировка — по ВСЕМУ загруженному набору

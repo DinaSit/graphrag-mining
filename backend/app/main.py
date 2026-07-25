@@ -103,12 +103,29 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+class RevalidatedStaticFiles(StaticFiles):
+    """Статика UI с обязательной ревалидацией.
+
+    Интерфейс собран из двадцати с лишним файлов (index.html, styles.css,
+    ES-модули js/) и меняется при каждой пересборке. Без Cache-Control браузер
+    кэширует их эвристически и может выполнять старый модуль рядом с новыми —
+    страница ломается без ошибок сборки и без видимой причины. no-cache
+    заставляет спрашивать сервер каждый раз; ETag сохраняется, поэтому
+    неизменившийся файл отдаётся как 304 без повторной передачи тела.
+    """
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 # UI — статика backend/ui: index.html, styles.css и ES-модули js/ (сборки нет,
 # модули загружает браузер); каталог может отсутствовать (поставляется
 # отдельно), это не прерывает запуск API
 UI_DIR = ROOT_DIR / "backend" / "ui"
 if UI_DIR.is_dir():
-    app.mount("/ui", StaticFiles(directory=str(UI_DIR), html=True), name="ui")
+    app.mount("/ui", RevalidatedStaticFiles(directory=str(UI_DIR), html=True), name="ui")
 else:
     log.warning("UI не смонтирован: каталог %s не найден", UI_DIR)
 

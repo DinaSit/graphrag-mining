@@ -450,3 +450,29 @@ def _plain_number_in_text(value: float, text: str) -> bool:
         if re.search(r"(?<![\w.,\-])" + re.escape(variant) + r"(?!\d|[.,]\d)", text):
             return True
     return False
+
+
+# Символы, которые разнятся между цитатой модели и текстом документа, не меняя
+# смысла: кавычки всех начертаний, тире всех длин, мягкий перенос. Приводятся
+# к пробелу, пробелы затем схлопываются. Без этой нормализации расхождений
+# втрое больше, и почти все они — форматирование, а не подмена текста
+_QUOTE_NOISE = str.maketrans({char: " " for char in "«»\"'“”„‘’—–-­‑"})
+
+
+def _normalize_quote(text: str | None) -> str:
+    lowered = str(text or "").lower().replace("ё", "е").translate(_QUOTE_NOISE)
+    return " ".join(lowered.split())
+
+
+def quote_in_source(quote: str | None, source_text: str | None) -> bool:
+    """Встречается ли цитата в тексте фрагмента дословно (с точностью до
+    регистра, ё/е, кавычек, тире и пробелов).
+
+    Единственная проверка в конвейере, которая сверяет утверждение модели
+    с документом напрямую, а не спрашивает модель о ней самой. Пустая цитата
+    проверке не подлежит — считается пройденной, противоречить нечему.
+    """
+    normalized = _normalize_quote(quote)
+    if not normalized:
+        return True
+    return normalized in _normalize_quote(source_text)

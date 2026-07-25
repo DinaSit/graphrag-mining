@@ -209,7 +209,10 @@ export function openGraphOverlay(st){
   const cap = el('div', 'cap');
   const title = dg.related ? 'Граф смежных данных' : 'Окрестность графа';
   cap.append(el('span', 't', title + ' · ' + (g.nodes || []).length + ' узлов, ' + (g.edges || []).length + ' связей'));
-  const close = el('button', null, 'закрыть ✕');
+  const close = el('button', 'x');
+  close.title = 'закрыть';
+  close.setAttribute('aria-label', 'закрыть');
+  close.innerHTML = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>';
   close.addEventListener('click', closeGraphOverlay);
   cap.append(close);
   panel.append(cap);

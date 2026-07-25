@@ -12,21 +12,6 @@ import { docPreviewSrc, openDocView } from './view_sources.js';
 // счётчики графа, действия). При входе выбран первый документ.
 export let dockDocId = null; // id документа в досье; сохраняется между перерисовками раздела
 
-// Пресет фильтра Review по документу — кликабельные счётчики досье ведут в
-// Review, уже отфильтрованный по этому документу; потребляется одноразово
-let reviewDocPreset = '';
-export function openReviewForDoc(docId){
-  reviewDocPreset = docId;
-  gotoRoute('review');
-}
-// Пресет забирается ровно один раз: экран Review читает значение и сбрасывает
-// его, чтобы следующий заход не унаследовал старый фильтр
-export function takeReviewDocPreset(){
-  const preset = reviewDocPreset;
-  reviewDocPreset = '';
-  return preset;
-}
-
 export function viewDocs(view){
   const wrap = el('div', 'docs');
   // заголовок раздела размещён в ЛЕВОЙ колонке: досье справа занимает раздел
@@ -256,7 +241,6 @@ export function dockBtn(cls, label, svg){
 export const _SVG_EYE = '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6z"/><circle cx="12" cy="12" r="2.6"/></svg>';
 export const _SVG_EYE_OFF = '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6z"/><circle cx="12" cy="12" r="2.6"/><line x1="4" y1="20" x2="20" y2="4"/></svg>';
 export const _SVG_TRASH = '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 7h16M9 7V5h6v2m-8 0 1 13h8l1-13"/></svg>';
-export const _SVG_DOWNLOAD = '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 4v11m0 0 4-4m-4 4-4-4M5 20h14"/></svg>';
 export const _SVG_REFRESH = '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6"/></svg>';
 
 export function openDock(d, lst, dock){
@@ -265,8 +249,8 @@ export function openDock(d, lst, dock){
   clear(dock);
   const dk = el('div', 'dk');
 
-  // Структура досье — по согласованному макету: превью → «почему научный» →
-  // «в графе знаний» → действия. Имя и признаки не дублируются — они в
+  // Структура досье: превью → «в графе знаний» со счётчиками и действиями в одной
+  // строке → обоснование признака. Имя и признаки не дублируются — они в
   // выбранной строке списка слева
   // Превью: единые правила с полностраничным просмотром (docPreviewSrc);
   // ни оригинала-PDF, ни конвертированного превью — статичная заглушка
@@ -286,38 +270,25 @@ export function openDock(d, lst, dock){
   pv.append(go);
   dk.append(pv);
 
-  if (d.trait_reason){
-    dk.append(el('div', 'lbl', d.is_scientific === false ? 'почему «ненаучный»' : 'почему «научный»'));
-    dk.append(el('div', 'why', d.trait_reason));
-  }
-
+  // Строка «в графе знаний»: слева счётчики (справочные, без переходов),
+  // справа действия над документом — один ряд над обоснованием признака
   dk.append(el('div', 'lbl', 'в графе знаний'));
-  // счётчики кликабельны: фрагменты разворачивают документ, факты и
-  // эксперименты открывают Review с фильтром по этому документу
+  const row = el('div', 'dkrow');
   const stats = el('div', 'stats');
-  const statBtn = (text, tip, fn) => {
-    const b = el('button', 'stbtn', text);
-    b.title = tip;
-    b.addEventListener('click', fn);
-    return b;
-  };
-  stats.append(statBtn(
+  const stat = text => el('span', 'stnum', text);
+  stats.append(stat(
     (d.element_count != null ? d.element_count : '—') + ' '
-      + plural(d.element_count || 0, 'фрагмент', 'фрагмента', 'фрагментов'),
-    'Развернуть', () => openDocView(d.id)));
+      + plural(d.element_count || 0, 'фрагмент', 'фрагмента', 'фрагментов')));
   if (d.facts_count != null){
-    stats.append(' · ', statBtn(
-      d.facts_count + ' ' + plural(d.facts_count, 'факт', 'факта', 'фактов'),
-      'Открыть в Review', () => openReviewForDoc(d.id)));
+    stats.append(' · ', stat(d.facts_count + ' ' + plural(d.facts_count, 'факт', 'факта', 'фактов')));
   }
   if (d.experiments_count != null){
-    stats.append(' · ', statBtn(
-      d.experiments_count + ' ' + plural(d.experiments_count, 'эксперимент', 'эксперимента', 'экспериментов'),
-      'Открыть в Review', () => openReviewForDoc(d.id)));
+    stats.append(' · ', stat(
+      d.experiments_count + ' ' + plural(d.experiments_count, 'эксперимент', 'эксперимента', 'экспериментов')));
   }
   if (d.status === 'processing') stats.append(' · обрабатывается…');
   if (d.status === 'failed') stats.append(' · обработка не удалась');
-  dk.append(stats);
+  row.append(stats);
 
   const acts = el('div', 'acts');
   // на маршруте docs render() принудительно перезагружает список (viewDocs →
@@ -339,15 +310,6 @@ export function openDock(d, lst, dock){
     }
   });
   acts.append(eye);
-
-  const dl = el('a', 'ic-btn');
-  dl.setAttribute('aria-label', 'Скачать');
-  dl.title = 'Скачать';
-  dl.href = '/documents/' + encodeURIComponent(d.id) + '/original';
-  dl.target = '_blank';
-  dl.rel = 'noopener noreferrer';
-  dl.innerHTML = _SVG_DOWNLOAD;
-  acts.append(dl);
 
   const rf = dockBtn(null, 'Перезагрузить документ в систему', _SVG_REFRESH);
   rf.addEventListener('click', async () => {
@@ -374,7 +336,13 @@ export function openDock(d, lst, dock){
     }
   });
   acts.append(del);
-  dk.append(acts);
+  row.append(acts);
+  dk.append(row);
+
+  if (d.trait_reason){
+    dk.append(el('div', 'lbl', d.is_scientific === false ? 'почему «ненаучный»' : 'почему «научный»'));
+    dk.append(el('div', 'why', d.trait_reason));
+  }
 
   dock.append(dk);
 }

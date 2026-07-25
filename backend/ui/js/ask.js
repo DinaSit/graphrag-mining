@@ -24,7 +24,7 @@ export function ask(q){
 export async function startWebAnswer(st){
   try {
     // Вместе с вопросом передаётся реестр источников: поиск на сервере идёт ровно
-    // по списку из карточки «Об ответе» (ru — русским запросом, en — переводом)
+    // по списку из карточки «О статье» (ru — русским запросом, en — переводом)
     const data = await apiJSON('/web/answer', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

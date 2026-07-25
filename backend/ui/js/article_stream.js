@@ -1,7 +1,7 @@
 import { ask } from './ask.js';
 import { render, routeName } from './router.js';
 import { S, loadDocs } from './state.js';
-import { paintAnswer, paintInfobox, paintMeta, recalcSpy, updateTocSpy } from './view_article.js';
+import { paintAnswer, paintChips, paintInfobox, recalcSpy, updateTocSpy } from './view_article.js';
 import { paintToc } from './web_mode.js';
 
 // ==================================================================
@@ -106,7 +106,7 @@ export function handleSSE(st, block){
 export function syncArticle(st, kind){
   if (routeName() !== 'article' || S.article !== st) return;
   if (st.phase === 'offtopic' || st.phase === 'error'){ render(); return; }
-  if (kind === 'evidence'){ paintToc(st); paintInfobox(st); paintMeta(st); }
+  if (kind === 'evidence'){ paintToc(st); paintInfobox(st); paintChips(st); }
   else if (kind === 'delta'){ scheduleAnswerPaint(st); }
   else render(); // 'final'; вызовы без kind до сюда не доходят (offtopic/error выше)
 }
@@ -150,13 +150,14 @@ export function allSources(st){
   const r = respOf(st);
   return [].concat(r.sources || [], r.related_sources || []);
 }
-// Число источников для чипа и карточки «Об ответе» — единое правило подсчёта
-export function srcTotal(st, r){
-  return allSources(st).length || (r.search_hits || []).length;
-}
-export function uniqueDocsCount(st){
+// Число ДОКУМЕНТОВ, давших материал ответу — единое правило подсчёта для чипа
+// и карточки «О статье». Считаются уникальные документы источников ответа и
+// смежных данных; если источников ещё нет — документы поисковых фрагментов
+export function usedDocsCount(st, r){
   const ids = new Set();
   for (const s of allSources(st)) if (s && s.document_id) ids.add(s.document_id);
-  for (const h of (respOf(st).search_hits || [])) if (h.source && h.source.document_id) ids.add(h.source.document_id);
+  if (!ids.size){
+    for (const h of r.search_hits || []) if (h.source && h.source.document_id) ids.add(h.source.document_id);
+  }
   return ids.size;
 }

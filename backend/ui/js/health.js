@@ -1,4 +1,4 @@
-import { $, REDUCED, apiJSON, clear, el, trunc } from './dom.js';
+import { $, REDUCED, apiJSON, clear, el } from './dom.js';
 import { S } from './state.js';
 
 // ==================================================================
@@ -36,8 +36,7 @@ export function paintSyspop(){
   const pop = $('#syspop');
   clear(pop);
   const h = S.health.data;
-  const titles = { ok: 'всё в норме', warn: 'есть деградация', bad: 'есть сбой' };
-  pop.append(el('div', 't', 'Системы · ' + titles[S.health.color]));
+  pop.append(el('div', 't', 'Состояние системы'));
   const row = (name, val, cls) => {
     const r = el('div', 'row');
     r.append(el('i', cls || ''), document.createTextNode(name), el('span', null, val));
@@ -54,9 +53,6 @@ export function paintSyspop(){
     const llmVal = [h.answer_llm_provider, h.answer_llm_model].filter(Boolean).join(' · ') || h.answer_llm_status || '—';
     row('LLM', llmVal, h.answer_llm_status === 'configured' ? '' : 'warn');
   }
-  const lastErr = h ? (h.postgres_last_error || h.neo4j_last_error || h.minio_last_error || h.answer_llm_error) : null;
-  const ago = Math.max(0, Math.round((Date.now() - S.health.at) / 1000));
-  pop.append(el('div', 'ft', 'Последняя ошибка: ' + (lastErr ? trunc(String(lastErr), 90) : 'нет') + ' · обновлено ' + ago + ' с назад'));
 }
 
 $('#sysdot').addEventListener('mouseenter', () => { paintSyspop(); $('#syspop').hidden = false; });

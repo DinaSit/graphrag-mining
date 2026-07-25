@@ -38,7 +38,7 @@ from app.pipeline.providers import (
     RemoteEmbeddingProvider,
     RemoteExtractionProvider,
 )
-from app.pipeline.validation import load_validation_rules, validate_candidate_numbers
+from app.pipeline.validation import load_validation_rules, quote_in_source, validate_candidate_numbers
 from app.schemas import (
     CandidateStatus,
     DocumentRecord,
@@ -461,12 +461,24 @@ class ApplicationStore:
             # Числа сверяются с полным текстом фрагмента: цитата обрезана
             # до 220 символов и заведомо не содержит всех значений
             fragment = self.fragments.get(candidate.source.fragment_id)
-            source_text = (fragment.text if fragment else "") or candidate.source.quote or ""
+            fragment_text = fragment.text if fragment else ""
+            source_text = fragment_text or candidate.source.quote or ""
             candidate.payload["number_validation"] = validate_candidate_numbers(
                 candidate.payload, source_text, self.validation_rules
             )
+            # Цитата сверяется ТОЛЬКО с текстом фрагмента: сверять её с самой
+            # собой бессмысленно, поэтому при отсутствующем фрагменте проверка
+            # не выполняется. Неподтверждённая цитата не показывается читателю —
+            # вместо неё в сноску идёт начало реального текста фрагмента
+            if fragment_text:
+                confirmed = quote_in_source(candidate.source.quote, fragment_text)
+                candidate.payload["quote_validated"] = confirmed
+                if not confirmed:
+                    candidate.source.quote = fragment_text[:220]
         number_validation = candidate.payload.get("number_validation", {})
         quality_issues = candidate_quality_issues(candidate.payload)
+        if candidate.payload.get("quote_validated") is False:
+            quality_issues.append("цитата не найдена в тексте источника")
         if candidate.source is None:
             # Инвариант системы: факт существует только со ссылкой на первоисточник,
             # поэтому кандидат без source не может быть approved — даже если

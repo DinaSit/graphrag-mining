@@ -2,7 +2,7 @@ import { ask } from './ask.js';
 import { el } from './dom.js';
 import { hideFnpop } from './footnote_popup.js';
 import { S } from './state.js';
-import { paintAnswer, paintAskError, paintFinalSections, paintInfobox, paintMeta, paintOfftopic, scheduleSpy } from './view_article.js';
+import { paintAnswer, paintAskError, paintChips, paintFinalSections, paintInfobox, paintOfftopic, scheduleSpy } from './view_article.js';
 import { applyWebMode, globeBtn, paintToc } from './web_mode.js';
 
 // ==================================================================
@@ -45,10 +45,8 @@ export function viewArticle(view){
   trow.append(el('h1', 'art', st.question));
   trow.append(globeBtn(st)); // переключатель веб-ответа — всегда на странице статьи
   art.append(trow);
-  const meta = el('div', 'meta'); meta.id = 'art-meta';
-  art.append(meta);
   // узкий экран (≤980, содержание скрыто): вместо мета-строки и карточки
-  // «Об ответе» — строка чипов с метриками; переключение выполняется только средствами CSS
+  // «О статье» — строка чипов с метриками; переключение выполняется только средствами CSS
   const chips = el('div', 'chips'); chips.id = 'art-chips';
   art.append(chips);
   const ans = el('div'); ans.id = 'sec-ans';
@@ -60,7 +58,7 @@ export function viewArticle(view){
 
   paintToc(st);
   paintInfobox(st);
-  paintMeta(st);
+  paintChips(st);
   paintAnswer(st);
   if (st.phase === 'done') paintFinalSections(st);
   else {
