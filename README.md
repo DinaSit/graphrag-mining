@@ -171,7 +171,6 @@ backend/
                               ES-модули (точка входа js/main.js); просмотрщик
                               pdf.js устанавливается при сборке образа
   migrations/001_init.sql     схема PostgreSQL + pgvector
-  scripts/                    seed_sample_data.py, reprocess_documents.py
 ml_extraction/                сервис извлечения: /extract, /embed, /chat_json,
                               /chat_stream, /web_search, /web_answer, /web_sources;
                               bge-m3, научные API, офлайн-перевод RU→EN

@@ -70,10 +70,6 @@ app/
   schemas.py              копии контрактных моделей backend; при изменении схем
                           синхронизируются вручную
   config.py               конфигурация из переменных окружения
-scripts/
-  probe_api.py            диагностика API: чат, JSON-формат, vision, эмбеддинги
-  run_corpus.py           извлечение по папке документов → JSON в results/
-  load_corpus.py          загрузка корпуса в базу знаний через /ingest backend
 ```
 
 ## Запуск
