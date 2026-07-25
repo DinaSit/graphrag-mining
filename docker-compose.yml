@@ -66,32 +66,6 @@ services:
       mc mb --ignore-existing local/graphrag-documents
       "
 
-  # Мок сервиса извлечения входит в образ backend (код — backend/app/ml_mock.py),
-  # отдельный образ не собирается. Свой healthcheck обязателен: HEALTHCHECK
-  # образа опрашивает порт 8000, а мок слушает 8001.
-  ml-mock:
-    restart: unless-stopped
-    build:
-      context: .
-      dockerfile: backend/Dockerfile
-    command: ["uvicorn", "app.ml_mock:app", "--host", "0.0.0.0", "--port", "8001"]
-    environment:
-      PYTHONPATH: /app/backend
-    ports:
-      - "8001:8001"
-    healthcheck:
-      test:
-        [
-          "CMD",
-          "python",
-          "-c",
-          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=2).read()"
-        ]
-      interval: 10s
-      timeout: 3s
-      retries: 5
-      start_period: 10s
-
   backend:
     restart: unless-stopped
     build:
@@ -107,7 +81,8 @@ services:
       MINIO_SECRET_KEY: graphrag-demo
       MINIO_BUCKET: graphrag-documents
       MINIO_SECURE: "false"
-      EXTRACTION_SERVICE_URL: http://ml-mock:8001/extract
+      # Адрес сервиса извлечения задаёт override; без него загрузка документов
+      # отвечает явной ошибкой, а не выдуманными фактами
       # Без EMBEDDINGS_URL работает deterministic-hash (64 измерения);
       # размерность колонки vector в PostgreSQL должна совпадать с провайдером
       EMBEDDING_DIM: "64"
@@ -127,8 +102,6 @@ services:
         condition: service_started
       minio-init:
         condition: service_completed_successfully
-      ml-mock:
-        condition: service_healthy
     # Повторяет HEALTHCHECK образа с теми же параметрами, но добавляет
     # start_period: неуспешные проверки в первые 10 с после старта
     # не учитываются в счётчике retries

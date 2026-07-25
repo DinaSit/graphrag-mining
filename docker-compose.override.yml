@@ -1,4 +1,4 @@
-# Override ML-A: подключает сервис извлечения на Yandex AI Studio вместо ml-mock.
+# Override ML-A: подключает сервис извлечения на Yandex AI Studio.
 # Docker Compose применяет файл автоматически; базовый docker-compose.yml не изменяется.
 # Требуется .env в корне репозитория: YANDEX_API_KEY=<ключ>, YANDEX_FOLDER_ID=<каталог>.
 # Возврат на mock: удалить или переименовать этот файл.
@@ -77,8 +77,6 @@ services:
       # WEB_SEARCH_TIMEOUT (8) + WEB_LLM_TIMEOUT (45) + запас на научные API
       # и сетевые накладные. Прокси backend добавляет поверх ещё +5 c.
       WEB_ANSWER_TIMEOUT: ${WEB_ANSWER_TIMEOUT:-75}
-    # !override заменяет базовый список целиком: зависимость от ml-mock снята,
-    # backend стартует даже при незапущенном mock-контейнере
     depends_on: !override
       postgres:
         condition: service_healthy

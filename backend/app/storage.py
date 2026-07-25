@@ -34,7 +34,6 @@ from app.pipeline.office_render import PREVIEW_SOURCE_EXTENSIONS, convert_office
 from app.pipeline.parsers import choose_parser, extension_of
 from app.pipeline.providers import (
     DeterministicEmbeddingProvider,
-    MockLLMProvider,
     RemoteEmbeddingProvider,
     RemoteExtractionProvider,
 )
@@ -82,7 +81,9 @@ class ApplicationStore:
         thresholds = self.validation_rules.get("thresholds", {})
         self.auto_approve_threshold = float(thresholds.get("auto_approve", AUTO_APPROVE_THRESHOLD))
         self.reject_threshold = float(thresholds.get("review_min", 0.60))
-        self.llm = RemoteExtractionProvider(extraction_service_url) if extraction_service_url else MockLLMProvider()
+        # Извлечение возможно только через сервис: заглушки нет намеренно —
+        # молча выдуманные факты хуже явного отказа при загрузке документа
+        self.llm = RemoteExtractionProvider(extraction_service_url) if extraction_service_url else None
         # Провайдер эмбеддингов выбирается окружением: EMBEDDINGS_URL задан —
         # внешний сервис (bge-m3 в ml-extraction, размерность EMBEDDING_DIM=1024),
         # не задан — детерминированный baseline (64)
@@ -363,7 +364,7 @@ class ApplicationStore:
             self._persist_fragments(fragments)
             self.persist_document(document, version)
 
-            candidates = self.llm.extract_entities(fragments)
+            candidates = self._extract(fragments)
             for candidate in candidates:
                 self.add_candidate(candidate)
 
@@ -420,7 +421,7 @@ class ApplicationStore:
             document.element_count = len(fragments)
             self.persist_document(document, version)
         try:
-            candidates = self.llm.extract_entities(fragments)
+            candidates = self._extract(fragments)
             accepted = 0
             for candidate in candidates:
                 # Документ могли удалить, пока шло извлечение (окно — минуты):
@@ -449,6 +450,13 @@ class ApplicationStore:
                     except Exception:
                         log.exception("Не удалось сохранить статус failed документа %s", document_id)
             raise
+
+    def _extract(self, fragments: list[SourceFragment]) -> list[ExtractionCandidate]:
+        """Извлечение кандидатов сервисом. Без адреса сервиса — явный отказ:
+        документ получит статус failed с понятной причиной, а не пустой результат."""
+        if self.llm is None:
+            raise RuntimeError("Извлечение недоступно: не задан EXTRACTION_SERVICE_URL")
+        return self.llm.extract_entities(fragments)
 
     def _document_alive(self, document_id: str) -> bool:
         """Документ существует и не находится в процессе удаления."""
