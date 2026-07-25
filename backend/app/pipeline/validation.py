@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,6 +12,18 @@ try:
     import yaml
 except ImportError:  # pragma: no cover
     yaml = None
+
+
+
+# Доменный каталог: тот же, что монтируется в контейнер read-only. Переопределяется
+# переменной DOMAIN_DIR — так сервис извлечения уже читает онтологию и промпты
+DOMAIN_DIR = Path(os.getenv("DOMAIN_DIR") or Path(__file__).resolve().parents[3] / "domain" / "default")
+
+
+def _read_yaml(path: Path) -> dict[str, Any]:
+    if yaml is None or not path.exists():
+        return {}
+    return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
 
 
 def load_validation_rules(domain_dir: Path) -> dict[str, Any]:
@@ -36,17 +49,68 @@ def load_validation_rules(domain_dir: Path) -> dict[str, Any]:
             rules["quantity_by_name"][name.lower()] = quantity
     return rules
 
+@dataclass(frozen=True)
+class QuantityHit:
+    value: float
+    unit: str
+    kind: str
+    normalized_value: float
+    normalized_unit: str
+
+
+@dataclass(frozen=True)
+class UnitSpec:
+    kind: str
+    unit: str
+    dimension: str
+    to_base: float
+
+
+@dataclass(frozen=True)
+class TargetQuantity:
+    dimension: str
+    unit: str
+    from_base: float
+
+
+def _load_units(domain_dir: Path) -> tuple[dict[str, UnitSpec], dict[str, TargetQuantity], list[str]]:
+    """Читает domain/default/units.yaml: приведение единиц к базовым (владелец —
+    инженер знаний). Возвращает таблицу алиасов, базовые единицы величин и
+    многосимвольные алиасы для шаблона поиска."""
+    specs: dict[str, UnitSpec] = {}
+    quantities: dict[str, TargetQuantity] = {}
+    aliases: set[str] = set()
+    data = _read_yaml(domain_dir / "units.yaml")
+    for kind, item in (data.get("units") or {}).items():
+        spec = UnitSpec(str(item.get("kind") or kind), str(item["unit"]),
+                        str(item["dimension"]), float(item["to_base"]))
+        for alias in item.get("aliases") or []:
+            specs[str(alias).lower()] = spec
+            # Односимвольные в шаблон не идут: они зависят от регистра и
+            # добавляются отдельным правилом (_SINGLE_CHAR_UNITS)
+            if len(str(alias)) > 1:
+                aliases.add(str(alias))
+    for name, item in (data.get("quantities") or {}).items():
+        quantities[name] = TargetQuantity(str(item["dimension"]), str(item["unit"]), float(item["from_base"]))
+    # Длинные написания раньше коротких: иначе «м» съест начало «м/с»
+    return specs, quantities, sorted(aliases, key=lambda a: (-len(a), a))
+
+
+
+
 
 # Составные единицы идут раньше однобуквенных: иначе «м» сопоставляется с началом «м/с».
 # Однобуквенные различаются регистром: «С» — Цельсий, «с» — секунды,
 # «В» — вольты, строчное «в» — предлог и единицей не считается.
-_UNITS = (
-    r"кВт·ч/т|kWh/t|мг/дм3|мг/дм³|mg/dm3|mg/dm³|г/дм3|г/дм³|g/dm3|g/dm³|м3/ч|м³/ч|m3/h|"
-    r"A/m2|А/м²|А/м2|мСм/см|mS/cm|мг/л|mg/l|г/л|g/l|г/т|g/t|м/с|m/s|MPa|МПа|bar|бар|atm|атм|ppm|kgf|кгс|"
-    r"т/сут(?:ки)?|t/day|т/ч|t/h|час(?:ами|а|ов)?|мин(?:ут(?:ами|а|ы|у)?)?|min|сек(?:унд(?:ами|а|ы|у)?)?|sec|"
-    r"мкм|μm|um|mm|мм|mV|мВ|NTU|%|°\s*[CcСс]|h|ч|m|м|"
-    r"(?-i:[CС])|(?-i:[sс])|(?-i:[VВ])"
-)
+_UNIT_SPECS, _TARGET_QUANTITIES, _MULTI_CHAR_UNITS = _load_units(DOMAIN_DIR)
+
+# Односимвольные единицы зависят от регистра и потому заданы шаблоном, а не
+# списком: «С» — Цельсий, «с» — секунды, «В» — предлог и единицей не считается.
+# Градус пишут и слитно, и через пробел
+_SINGLE_CHAR_UNITS = r"%|°\s*[CcСс]|h|ч|m|м|(?-i:[CС])|(?-i:[sс])|(?-i:[VВ])"
+
+# Составные единицы идут раньше однобуквенных: иначе «м» сопоставляется с началом «м/с»
+_UNITS = "|".join([*(re.escape(a) for a in _MULTI_CHAR_UNITS), _SINGLE_CHAR_UNITS])
 
 # Число: допускает разделители тысяч пробелом («12 000») и десятичную запятую
 _NUM_CORE = r"(?:\d{1,3}(?:[   ]\d{3})+|\d+)(?:[.,]\d+)?"
@@ -79,131 +143,6 @@ PH_RE = re.compile(
     r"(?:\s*(?:\.{2,3}|…|[\-−–—])\s*(?P<value2>\d+(?:[.,]\d+)?))?",
     re.IGNORECASE,
 )
-
-
-@dataclass(frozen=True)
-class QuantityHit:
-    value: float
-    unit: str
-    kind: str
-    normalized_value: float
-    normalized_unit: str
-
-
-@dataclass(frozen=True)
-class UnitSpec:
-    kind: str
-    unit: str
-    dimension: str
-    to_base: float
-
-
-@dataclass(frozen=True)
-class TargetQuantity:
-    dimension: str
-    unit: str
-    from_base: float
-
-
-_UNIT_SPECS: dict[str, UnitSpec] = {
-    "c": UnitSpec("temperature", "C", "temperature", 1.0),
-    "°c": UnitSpec("temperature", "C", "temperature", 1.0),
-    "с": UnitSpec("temperature", "C", "temperature", 1.0),
-    "°с": UnitSpec("temperature", "C", "temperature", 1.0),
-    "h": UnitSpec("duration", "h", "duration", 1.0),
-    "ч": UnitSpec("duration", "h", "duration", 1.0),
-    "час": UnitSpec("duration", "h", "duration", 1.0),
-    "часа": UnitSpec("duration", "h", "duration", 1.0),
-    "часов": UnitSpec("duration", "h", "duration", 1.0),
-    "часами": UnitSpec("duration", "h", "duration", 1.0),
-    "%": UnitSpec("relative_effect", "%", "relative_effect", 1.0),
-    "м3/ч": UnitSpec("flow_rate", "m3/h", "flow_rate", 1.0),
-    "м³/ч": UnitSpec("flow_rate", "m3/h", "flow_rate", 1.0),
-    "m3/h": UnitSpec("flow_rate", "m3/h", "flow_rate", 1.0),
-    "kgf": UnitSpec("force", "kgf", "force", 1.0),
-    "кгс": UnitSpec("force", "kgf", "force", 1.0),
-    "мг/л": UnitSpec("concentration", "mg/L", "concentration", 1.0),
-    "мг/дм3": UnitSpec("concentration", "mg/L", "concentration", 1.0),
-    "мг/дм³": UnitSpec("concentration", "mg/L", "concentration", 1.0),
-    "mg/l": UnitSpec("concentration", "mg/L", "concentration", 1.0),
-    "mg/dm3": UnitSpec("concentration", "mg/L", "concentration", 1.0),
-    "mg/dm³": UnitSpec("concentration", "mg/L", "concentration", 1.0),
-    "г/л": UnitSpec("concentration_high", "g/L", "concentration", 1000.0),
-    "г/дм3": UnitSpec("concentration_high", "g/L", "concentration", 1000.0),
-    "г/дм³": UnitSpec("concentration_high", "g/L", "concentration", 1000.0),
-    "g/l": UnitSpec("concentration_high", "g/L", "concentration", 1000.0),
-    "g/dm3": UnitSpec("concentration_high", "g/L", "concentration", 1000.0),
-    "g/dm³": UnitSpec("concentration_high", "g/L", "concentration", 1000.0),
-    "г/т": UnitSpec("concentration_trace", "g/t", "concentration_trace", 1.0),
-    "g/t": UnitSpec("concentration_trace", "g/t", "concentration_trace", 1.0),
-    "ppm": UnitSpec("concentration", "mg/L", "concentration", 1.0),
-    "м/с": UnitSpec("velocity", "m/s", "velocity", 1.0),
-    "m/s": UnitSpec("velocity", "m/s", "velocity", 1.0),
-    "mpa": UnitSpec("pressure", "MPa", "pressure", 1.0),
-    "мпа": UnitSpec("pressure", "MPa", "pressure", 1.0),
-    "bar": UnitSpec("pressure", "MPa", "pressure", 0.1),
-    "бар": UnitSpec("pressure", "MPa", "pressure", 0.1),
-    "atm": UnitSpec("pressure", "MPa", "pressure", 0.101325),
-    "атм": UnitSpec("pressure", "MPa", "pressure", 0.101325),
-    "mm": UnitSpec("length", "mm", "length", 1.0),
-    "мм": UnitSpec("length", "mm", "length", 1.0),
-    "m": UnitSpec("length_m", "m", "length", 1000.0),
-    "м": UnitSpec("length_m", "m", "length", 1000.0),
-    "мкм": UnitSpec("length_um", "um", "length", 0.001),
-    "μm": UnitSpec("length_um", "um", "length", 0.001),
-    "um": UnitSpec("length_um", "um", "length", 0.001),
-    "v": UnitSpec("voltage", "V", "voltage", 1.0),
-    "в": UnitSpec("voltage", "V", "voltage", 1.0),
-    "mv": UnitSpec("voltage_mv", "mV", "voltage", 0.001),
-    "мв": UnitSpec("voltage_mv", "mV", "voltage", 0.001),
-    "a/m2": UnitSpec("current_density", "A/m2", "current_density", 1.0),
-    "а/м2": UnitSpec("current_density", "A/m2", "current_density", 1.0),
-    "а/м²": UnitSpec("current_density", "A/m2", "current_density", 1.0),
-    "квт·ч/т": UnitSpec("specific_energy", "kWh/t", "specific_energy", 1.0),
-    "kwh/t": UnitSpec("specific_energy", "kWh/t", "specific_energy", 1.0),
-    "т/ч": UnitSpec("mass_flow", "t/h", "mass_flow", 1.0),
-    "t/h": UnitSpec("mass_flow", "t/h", "mass_flow", 1.0),
-    "ntu": UnitSpec("turbidity", "NTU", "turbidity", 1.0),
-    "ms/cm": UnitSpec("conductivity", "mS/cm", "conductivity", 1.0),
-    "мсм/см": UnitSpec("conductivity", "mS/cm", "conductivity", 1.0),
-    "ph": UnitSpec("dimensionless", "pH", "dimensionless", 1.0),
-}
-
-# Минуты и секунды приводятся к часам; т/сут — к т/ч
-for _alias in ("мин", "минут", "минута", "минуты", "минуту", "минутами", "min"):
-    _UNIT_SPECS[_alias] = UnitSpec("duration", "h", "duration", 1.0 / 60.0)
-for _alias in ("сек", "секунд", "секунда", "секунды", "секунду", "секундами", "sec", "s"):
-    _UNIT_SPECS[_alias] = UnitSpec("duration", "h", "duration", 1.0 / 3600.0)
-for _alias in ("т/сут", "т/сутки", "t/day"):
-    _UNIT_SPECS[_alias] = UnitSpec("mass_flow", "t/h", "mass_flow", 1.0 / 24.0)
-del _alias
-
-
-_TARGET_QUANTITIES: dict[str, TargetQuantity] = {
-    "temperature": TargetQuantity("temperature", "C", 1.0),
-    "duration": TargetQuantity("duration", "h", 1.0),
-    "relative_effect": TargetQuantity("relative_effect", "%", 1.0),
-    "flow_rate": TargetQuantity("flow_rate", "m3/h", 1.0),
-    "force": TargetQuantity("force", "kgf", 1.0),
-    "pressure": TargetQuantity("pressure", "MPa", 1.0),
-    "pressure_bar": TargetQuantity("pressure", "bar", 10.0),
-    "pressure_atm": TargetQuantity("pressure", "atm", 9.869232667),
-    "length": TargetQuantity("length", "mm", 1.0),
-    "length_m": TargetQuantity("length", "m", 0.001),
-    "length_um": TargetQuantity("length", "um", 1000.0),
-    "voltage": TargetQuantity("voltage", "V", 1.0),
-    "voltage_mv": TargetQuantity("voltage", "mV", 1000.0),
-    "current_density": TargetQuantity("current_density", "A/m2", 1.0),
-    "specific_energy": TargetQuantity("specific_energy", "kWh/t", 1.0),
-    "mass_flow": TargetQuantity("mass_flow", "t/h", 1.0),
-    "velocity": TargetQuantity("velocity", "m/s", 1.0),
-    "concentration": TargetQuantity("concentration", "mg/L", 1.0),
-    "concentration_high": TargetQuantity("concentration", "g/L", 0.001),
-    "concentration_trace": TargetQuantity("concentration_trace", "g/t", 1.0),
-    "dimensionless": TargetQuantity("dimensionless", "pH", 1.0),
-    "turbidity": TargetQuantity("turbidity", "NTU", 1.0),
-    "conductivity": TargetQuantity("conductivity", "mS/cm", 1.0),
-}
 
 
 def extract_quantity_hits(text: str) -> list[QuantityHit]:

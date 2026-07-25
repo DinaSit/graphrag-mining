@@ -1,63 +1,186 @@
-temperature:
-  canonical: C
-  aliases: ["C", "°C", "с", "°с"]
-duration:
-  canonical: h
-  aliases: ["h", "ч", "час", "часов"]
-relative_effect:
-  canonical: "%"
-  aliases: ["%", "percent", "процент"]
-flow_rate:
-  canonical: m3/h
-  aliases: ["m3/h", "м³/ч"]
-force:
-  canonical: kgf
-  aliases: ["kgf", "кгс", "kilogram-force"]
-pressure:
-  canonical: MPa
-  aliases: ["MPa", "МПа"]
-pressure_bar:
-  canonical: bar
-  aliases: ["bar", "бар"]
-pressure_atm:
-  canonical: atm
-  aliases: ["atm", "атм"]
-length:
-  canonical: mm
-  aliases: ["mm", "мм"]
-length_m:
-  canonical: m
-  aliases: ["m", "м"]
-length_um:
-  canonical: μm
-  aliases: ["μm", "мкм", "um"]
-voltage:
-  canonical: V
-  aliases: ["V", "В", "в"]
-voltage_mv:
-  canonical: mV
-  aliases: ["mV", "мВ"]
-mass_flow:
-  canonical: t/h
-  aliases: ["t/h", "т/ч"]
-current_density:
-  canonical: A/m2
-  aliases: ["A/m2", "А/м²"]
-concentration:
-  canonical: mg/dm3
-  aliases: ["mg/dm3", "мг/дм³", "mg/l", "мг/л"]
-concentration_high:
-  canonical: g/dm3
-  aliases: ["g/dm3", "g/dm³", "г/дм³", "g/l", "г/л"]
-concentration_trace:
-  canonical: g/t
-  aliases: ["g/t", "г/т", "ppm"]
-specific_energy:
-  canonical: kWh/t
-  aliases: ["kWh/t", "кВт·ч/т"]
-turbidity:
-  canonical: NTU
-  aliases: ["NTU"]
-conductivity:
-  canonical: mS/cm
-  aliases: ["mS/cm", "мСм/см"]
+# Единицы измерения: как они пишутся в документах и к чему приводятся при сверке
+# чисел факта с текстом источника. Зона инженера знаний — новая единица
+# добавляется сюда, правка кода не нужна.
+#
+#   kind      тип величины в таблице приведения; по умолчанию — имя группы
+#   unit      каноническая запись для отображения
+#   dimension величина: сравнивать между собой можно только одинаковые
+#   to_base   множитель к базовой единице величины (см. quantities ниже)
+#   aliases   написания, которые ищутся в тексте; строчными буквами
+#
+# Односимвольные единицы (C, с, V, в, s, h, ч, m, м) перечислены в aliases —
+# по ним строится таблица приведения. Но в шаблон ПОИСКА по тексту они
+# подставляются отдельным правилом в validation.py: односимвольные зависят от
+# регистра («С» — Цельсий, «с» — секунды, «в» — предлог, а не вольты).
+
+units:
+  temperature:
+    unit: C
+    dimension: temperature
+    to_base: 1.0
+    aliases: ["c", "°c", "с", "°с"]
+
+  duration:
+    unit: h
+    dimension: duration
+    to_base: 1.0
+    aliases: ["h", "ч", "час", "часа", "часов", "часами"]
+  duration_min:
+    kind: duration
+    unit: h
+    dimension: duration
+    to_base: 0.016666666666666666    # 1/60
+    aliases: ["мин", "минут", "минута", "минуты", "минуту", "минутами", "min"]
+  duration_sec:
+    kind: duration
+    unit: h
+    dimension: duration
+    to_base: 0.0002777777777777778   # 1/3600
+    aliases: ["сек", "секунд", "секунда", "секунды", "секунду", "секундами", "sec", "s"]
+
+  relative_effect:
+    unit: "%"
+    dimension: relative_effect
+    to_base: 1.0
+    aliases: ["%"]
+
+  concentration:
+    unit: mg/L
+    dimension: concentration
+    to_base: 1.0
+    aliases: ["мг/л", "мг/дм3", "мг/дм³", "mg/l", "mg/dm3", "mg/dm³", "ppm"]
+  concentration_high:
+    unit: g/L
+    dimension: concentration
+    to_base: 1000.0
+    aliases: ["г/л", "г/дм3", "г/дм³", "g/l", "g/dm3", "g/dm³"]
+  concentration_trace:
+    unit: g/t
+    dimension: concentration_trace
+    to_base: 1.0
+    aliases: ["г/т", "g/t"]
+
+  pressure:
+    unit: MPa
+    dimension: pressure
+    to_base: 1.0
+    aliases: ["mpa", "мпа"]
+  pressure_bar:
+    kind: pressure
+    unit: MPa
+    dimension: pressure
+    to_base: 0.1
+    aliases: ["bar", "бар"]
+  pressure_atm:
+    kind: pressure
+    unit: MPa
+    dimension: pressure
+    to_base: 0.101325
+    aliases: ["atm", "атм"]
+
+  length:
+    unit: mm
+    dimension: length
+    to_base: 1.0
+    aliases: ["mm", "мм"]
+  length_m:
+    unit: m
+    dimension: length
+    to_base: 1000.0
+    aliases: ["m", "м"]
+  length_um:
+    unit: um
+    dimension: length
+    to_base: 0.001
+    aliases: ["мкм", "μm", "um"]
+
+  voltage:
+    unit: V
+    dimension: voltage
+    to_base: 1.0
+    aliases: ["v", "в"]
+  voltage_mv:
+    unit: mV
+    dimension: voltage
+    to_base: 0.001
+    aliases: ["mv", "мв"]
+
+  flow_rate:
+    unit: m3/h
+    dimension: flow_rate
+    to_base: 1.0
+    aliases: ["м3/ч", "м³/ч", "m3/h"]
+  mass_flow:
+    unit: t/h
+    dimension: mass_flow
+    to_base: 1.0
+    aliases: ["т/ч", "t/h"]
+  mass_flow_day:
+    kind: mass_flow
+    unit: t/h
+    dimension: mass_flow
+    to_base: 0.041666666666666664    # 1/24
+    aliases: ["т/сут", "т/сутки", "t/day"]
+  velocity:
+    unit: m/s
+    dimension: velocity
+    to_base: 1.0
+    aliases: ["м/с", "m/s"]
+
+  force:
+    unit: kgf
+    dimension: force
+    to_base: 1.0
+    aliases: ["kgf", "кгс"]
+  current_density:
+    unit: A/m2
+    dimension: current_density
+    to_base: 1.0
+    aliases: ["a/m2", "а/м2", "а/м²"]
+  specific_energy:
+    unit: kWh/t
+    dimension: specific_energy
+    to_base: 1.0
+    aliases: ["квт·ч/т", "kwh/t"]
+  turbidity:
+    unit: NTU
+    dimension: turbidity
+    to_base: 1.0
+    aliases: ["ntu"]
+  conductivity:
+    unit: mS/cm
+    dimension: conductivity
+    to_base: 1.0
+    aliases: ["мсм/см", "ms/cm"]
+  dimensionless:
+    unit: pH
+    dimension: dimensionless
+    to_base: 1.0
+    aliases: ["ph"]
+
+# Базовая единица каждой величины: к ней приводятся значения перед сравнением,
+# from_base — обратный множитель, когда результат нужен в запрошенной единице
+quantities:
+  temperature:         { dimension: temperature, unit: C, from_base: 1.0 }
+  duration:            { dimension: duration, unit: h, from_base: 1.0 }
+  relative_effect:     { dimension: relative_effect, unit: "%", from_base: 1.0 }
+  flow_rate:           { dimension: flow_rate, unit: m3/h, from_base: 1.0 }
+  force:               { dimension: force, unit: kgf, from_base: 1.0 }
+  pressure:            { dimension: pressure, unit: MPa, from_base: 1.0 }
+  pressure_bar:        { dimension: pressure, unit: bar, from_base: 10.0 }
+  pressure_atm:        { dimension: pressure, unit: atm, from_base: 9.869232667 }
+  length:              { dimension: length, unit: mm, from_base: 1.0 }
+  length_m:            { dimension: length, unit: m, from_base: 0.001 }
+  length_um:           { dimension: length, unit: um, from_base: 1000.0 }
+  voltage:             { dimension: voltage, unit: V, from_base: 1.0 }
+  voltage_mv:          { dimension: voltage, unit: mV, from_base: 1000.0 }
+  current_density:     { dimension: current_density, unit: A/m2, from_base: 1.0 }
+  specific_energy:     { dimension: specific_energy, unit: kWh/t, from_base: 1.0 }
+  mass_flow:           { dimension: mass_flow, unit: t/h, from_base: 1.0 }
+  velocity:            { dimension: velocity, unit: m/s, from_base: 1.0 }
+  concentration:       { dimension: concentration, unit: mg/L, from_base: 1.0 }
+  concentration_high:  { dimension: concentration, unit: g/L, from_base: 0.001 }
+  concentration_trace: { dimension: concentration_trace, unit: g/t, from_base: 1.0 }
+  dimensionless:       { dimension: dimensionless, unit: pH, from_base: 1.0 }
+  turbidity:           { dimension: turbidity, unit: NTU, from_base: 1.0 }
+  conductivity:        { dimension: conductivity, unit: mS/cm, from_base: 1.0 }

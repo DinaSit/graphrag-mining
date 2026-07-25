@@ -6,17 +6,18 @@
 """
 import csv
 from functools import lru_cache
-from pathlib import Path
 
 import yaml
 
 from app import config
 
-_TEMPLATES = {
+# Промпты живут в доменном каталоге рядом с онтологией и словарями: их правит
+# инженер знаний, изменение применяется перезапуском контейнера без пересборки
+_TEMPLATE_NAMES = {
     # Полный разбор: числа, таблицы, сканы — с числовыми правилами и словарём терминов
-    "full": Path(__file__).parent / "prompts" / "extraction.md",
+    "full": "extraction.md",
     # Облегчённый разбор: простой текст без чисел — промпт короче в ~4 раза
-    "light": Path(__file__).parent / "prompts" / "extraction_light.md",
+    "light": "extraction_light.md",
 }
 
 # Сколько канонических терминов каждого типа включать в промпт
@@ -25,7 +26,7 @@ _TERMS_PER_TYPE = 40
 
 @lru_cache
 def _static_prompt(mode: str = "full") -> str:
-    template = _TEMPLATES[mode].read_text(encoding="utf-8")
+    template = (config.DOMAIN_DIR / "prompts" / _TEMPLATE_NAMES[mode]).read_text(encoding="utf-8")
 
     ontology = yaml.safe_load((config.DOMAIN_DIR / "ontology.yaml").read_text(encoding="utf-8"))
 

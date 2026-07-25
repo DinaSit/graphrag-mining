@@ -12,5 +12,4 @@ minio-data
 *.log
 backend/tests/
 ml_extraction/tests/
-.claude
 .DS_Store
