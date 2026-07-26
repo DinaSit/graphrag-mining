@@ -27,11 +27,9 @@ def _read_yaml(path: Path) -> dict[str, Any]:
 
 
 def load_validation_rules(domain_dir: Path) -> dict[str, Any]:
-    """Читает domain/default/validation-rules.yaml: пороги кандидатов и
-    диапазоны правдоподобия числовых параметров (владелец — инженер знаний).
-    """
+    """Читает domain/default/validation-rules.yaml: диапазоны правдоподобия
+    числовых параметров (владелец — инженер знаний)."""
     rules: dict[str, Any] = {
-        "thresholds": {},
         "ranges_by_name": {},
         "quantity_by_name": {},
     }
@@ -39,7 +37,6 @@ def load_validation_rules(domain_dir: Path) -> dict[str, Any]:
     if yaml is None or not path.exists():
         return rules
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    rules["thresholds"] = data.get("candidate_thresholds", {})
     for name, spec in (data.get("params") or {}).items():
         if not isinstance(spec, dict) or "min" not in spec or "max" not in spec:
             continue

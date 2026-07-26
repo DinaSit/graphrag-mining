@@ -56,7 +56,7 @@ def fact_from_candidate(normalizer: DomainNormalizer, candidate: ExtractionCandi
         lab=clean_extracted(payload.get("lab")),
         team=clean_extracted(payload.get("team")),
         equipment=clean_extracted(payload.get("equipment")) or None,
-        confidence=float(payload.get("confidence") or candidate.confidence),
+        confidence=extraction_confidence(payload),
         source=source,
     )
 
@@ -75,3 +75,27 @@ def candidate_quality_issues(payload: dict[str, Any]) -> list[str]:
     if missing(payload.get("property")):
         issues.append("property не извлечён")
     return issues
+
+
+# Проверки извлечения, из которых складывается уверенность факта. Все три
+# механические: их результат можно перепроверить по документу, не спрашивая
+# модель. Самооценка модели (candidate.confidence) в уверенность факта не входит —
+# она осталась порогом автоприёма кандидата
+def extraction_confidence(payload: dict[str, Any]) -> float:
+    """Доля пройденных проверок извлечения: 0, 0.333, 0.667 или 1.0.
+
+    1. Цитата найдена в тексте фрагмента-источника.
+    2. Числа факта подтверждены текстом источника (чисел нет — проверка пройдена).
+    3. Извлечены ключевые поля: материал и свойство.
+
+    Проверка, которую не удалось выполнить (нет фрагмента в сторе), считается
+    непройденной: «не проверено» — это не «проверено».
+    """
+    passed = 0
+    if payload.get("quote_validated") is True:
+        passed += 1
+    if (payload.get("number_validation") or {}).get("validated", True):
+        passed += 1
+    if not candidate_quality_issues(payload):
+        passed += 1
+    return round(passed / 3, 3)

@@ -59,8 +59,6 @@ except ImportError:  # pragma: no cover
 
 log = logging.getLogger(__name__)
 
-AUTO_APPROVE_THRESHOLD = 0.85
-
 __all__ = ["ApplicationStore", "SourceRequiredError"]
 
 
@@ -75,12 +73,10 @@ class ApplicationStore:
     ):
         self.domain_dir = domain_dir
         self.normalizer = DomainNormalizer(domain_dir)
-        # Пороги кандидатов и диапазоны правдоподобия — из validation-rules.yaml
-        # (владелец — инженер знаний); значения по умолчанию сохраняют прежнее поведение
+        # Диапазоны правдоподобия чисел — из validation-rules.yaml (владелец —
+        # инженер знаний). Порогов по самооценке модели больше нет: судьбу
+        # кандидата решают проверки, см. add_candidate
         self.validation_rules = load_validation_rules(domain_dir)
-        thresholds = self.validation_rules.get("thresholds", {})
-        self.auto_approve_threshold = float(thresholds.get("auto_approve", AUTO_APPROVE_THRESHOLD))
-        self.reject_threshold = float(thresholds.get("review_min", 0.60))
         # Извлечение возможно только через сервис: заглушки нет намеренно —
         # молча выдуманные факты хуже явного отказа при загрузке документа
         self.llm = RemoteExtractionProvider(extraction_service_url) if extraction_service_url else None
@@ -483,29 +479,26 @@ class ApplicationStore:
                 candidate.payload["quote_validated"] = confirmed
                 if not confirmed:
                     candidate.source.quote = fragment_text[:220]
+        # Ворота в граф: все три механические проверки пройдены — кандидат
+        # становится фактом сам; хоть одна не пройдена — идёт к эксперту с
+        # названной причиной. Автоотклонения нет: выбрасывать утверждение,
+        # которого человек не видел, нечем оправдать
         number_validation = candidate.payload.get("number_validation", {})
-        quality_issues = candidate_quality_issues(candidate.payload)
-        if candidate.payload.get("quote_validated") is False:
-            quality_issues.append("цитата не найдена в тексте источника")
+        issues = candidate_quality_issues(candidate.payload)
         if candidate.source is None:
-            # Инвариант системы: факт существует только со ссылкой на первоисточник,
-            # поэтому кандидат без source не может быть approved — даже если
-            # статус уже проставлен снаружи (бэкфилл через /candidates)
-            quality_issues.append("нет ссылки на source fragment")
-            if candidate.status == CandidateStatus.approved:
-                candidate.status = CandidateStatus.pending_review
-        if quality_issues:
-            candidate.review_note = "Кандидат требует проверки: " + "; ".join(quality_issues)
-        elif candidate.confidence >= self.auto_approve_threshold:
-            if number_validation.get("validated", True):
-                candidate.status = CandidateStatus.approved
-            else:
-                # «Ошибки в числах недопустимы»: сомнительные числа не проходят
-                # в граф автоматически — только через эксперта
-                candidate.review_note = "Числа требуют проверки: " + "; ".join(number_validation.get("issues", [])[:3])
-        elif candidate.confidence < self.reject_threshold:
-            candidate.status = CandidateStatus.rejected
-            candidate.review_note = "Confidence below approval threshold"
+            # Инвариант системы: факт существует только со ссылкой на первоисточник
+            issues.append("нет ссылки на source fragment")
+        elif candidate.payload.get("quote_validated") is not True:
+            issues.append("цитата не подтверждена текстом источника")
+        if not number_validation.get("validated", True):
+            # «Ошибки в числах недопустимы»: сомнительные числа не проходят в граф
+            issues.append("числа не подтверждены: " + "; ".join(number_validation.get("issues", [])[:3]))
+        if issues:
+            candidate.status = CandidateStatus.pending_review
+            candidate.review_note = "Кандидат требует проверки: " + "; ".join(issues)
+        else:
+            candidate.status = CandidateStatus.approved
+            candidate.review_note = None
         self.candidates[candidate.id] = candidate
         self._persist_candidate(candidate)
         if candidate.status == CandidateStatus.approved:
