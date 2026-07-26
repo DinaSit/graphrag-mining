@@ -461,6 +461,9 @@ class ApplicationStore:
     # --- Кандидаты и факты ---
 
     def add_candidate(self, candidate: ExtractionCandidate) -> ExtractionCandidate:
+        # Прежнее состояние нужно, чтобы поймать понижение: кандидат мог быть
+        # утверждён раньше, и его факт обязан уйти вместе со статусом
+        previous = self.candidates.get(candidate.id)
         if candidate.source:
             # Числа сверяются с полным текстом фрагмента: цитата обрезана
             # до 220 символов и заведомо не содержит всех значений
@@ -503,6 +506,11 @@ class ApplicationStore:
         self._persist_candidate(candidate)
         if candidate.status == CandidateStatus.approved:
             self.approve_candidate(candidate.id)
+        elif previous is not None and previous.status == CandidateStatus.approved:
+            # Повторная обработка документа разобрала фрагмент иначе, и кандидат
+            # больше не проходит ворота: утверждение снимается, иначе в графе
+            # остаётся факт, который система сама считает непроверенным
+            self.unapprove_candidate(candidate.id, candidate.review_note)
         return candidate
 
     def approve_candidate(self, candidate_id: str) -> Fact:
