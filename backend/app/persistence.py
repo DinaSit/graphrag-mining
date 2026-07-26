@@ -321,6 +321,13 @@ class PostgresSink:
         for statement in statements:
             self._execute(statement, ())
 
+    def delete_fact(self, fact_id: str) -> None:
+        """Удаляет одно утверждение. Кандидат, фрагмент и документ не трогаются:
+        снятое утверждение восстанавливается из кандидата тем же id."""
+        if not self.enabled:
+            return
+        self._execute("DELETE FROM facts WHERE id = %s", (fact_id,))
+
     def delete_document_data(self, document_id: str) -> None:
         """Каскадное удаление всего, что связано с документом (порядок — по FK)."""
         if not self.enabled:
@@ -657,6 +664,15 @@ class Neo4jSink:
             self.last_error = str(exc)
             log.error("Neo4j: чтение не выполнено: %s", exc)
         return rows
+
+    def delete_fact(self, fact_id: str) -> None:
+        """Убирает узел утверждения и осиротевшие после него вершины.
+        SourceFragment остаётся: он принадлежит документу, а не утверждению."""
+        if not self.enabled:
+            return
+        self._write("MATCH (c:Claim {id: $fact_id}) DETACH DELETE c", {"fact_id": fact_id})
+        self._write("MATCH (e:Experiment) WHERE NOT (e)<-[:BASED_ON]-() DETACH DELETE e", {})
+        self._write("MATCH (n) WHERE NOT (n)--() DELETE n", {})
 
     def delete_document(self, document_id: str, claim_ids: list[str]) -> None:
         """Удаляет из графа узлы документа и осиротевшие вершины."""

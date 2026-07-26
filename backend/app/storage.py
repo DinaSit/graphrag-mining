@@ -518,6 +518,34 @@ class ApplicationStore:
         self._project_semantics(fact, candidate)
         return fact
 
+    def unapprove_candidate(self, candidate_id: str, note: str | None = None) -> ExtractionCandidate:
+        """Снимает утверждение: факт уходит из графа, кандидат возвращается в очередь.
+
+        Первоисточник не трогается — кандидат со всем разбором, фрагмент и документ
+        остаются. Идентификатор факта выводится из идентификатора кандидата, поэтому
+        повторное подтверждение вернёт то же утверждение с тем же id, и ссылки на
+        него снова разрешатся.
+        """
+        candidate = self.candidates[candidate_id]
+        fact_id = f"claim-{candidate_id.replace('candidate-', '')}"
+        self.facts.pop(fact_id, None)
+        if self.postgres_sink:
+            self.postgres_sink.delete_fact(fact_id)
+        if self.graph_sink:
+            self.graph_sink.delete_fact(fact_id)
+        # У соседей не должно остаться ссылки в пустоту: снимаем пометку
+        # противоречия, а статус возвращаем, если противоречить стало нечему
+        for other in list(self.facts.values()):
+            if fact_id in other.conflicts_with:
+                other.conflicts_with = [fid for fid in other.conflicts_with if fid != fact_id]
+                if not other.conflicts_with and other.status == "conflicting":
+                    other.status = "approved"
+                self.persist_fact(other)
+        candidate.status = CandidateStatus.pending_review
+        candidate.review_note = note
+        self._persist_candidate(candidate)
+        return candidate
+
     def reject_candidate(self, candidate_id: str, note: str | None = None) -> ExtractionCandidate:
         candidate = self.candidates[candidate_id]
         candidate.status = CandidateStatus.rejected
