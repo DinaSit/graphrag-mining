@@ -34,6 +34,12 @@ DOMAIN_DIR = Path(os.environ.get("DOMAIN_DIR", str(Path(__file__).resolve().pare
 
 MIN_FRAGMENT_CHARS = int(os.environ.get("MIN_FRAGMENT_CHARS", "40"))
 
+# Сколько знаков уходит в модель за один вызов. Ориентир — страница PDF
+# (~2500 знаков): на корпусе документы, разобранные постранично, дали вдвое
+# большую долю полных фактов, чем разобранные по абзацам, и втрое больше
+# утверждений на вызов
+WINDOW_CHARS = int(os.environ.get("WINDOW_CHARS", "2500"))
+
 
 def model_uri(name: str, scheme: str = "gpt") -> str:
     if name.startswith(("gpt://", "emb://")):

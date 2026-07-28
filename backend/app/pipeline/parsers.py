@@ -22,8 +22,14 @@ except ImportError:  # pragma: no cover
 
 try:
     from docx import Document as DocxDocument
+    from docx.oxml.ns import qn as docx_qn
+    from docx.table import Table as DocxTable
+    from docx.text.paragraph import Paragraph as DocxParagraph
 except ImportError:  # pragma: no cover
     DocxDocument = None
+    docx_qn = None
+    DocxTable = None
+    DocxParagraph = None
 
 try:
     from openpyxl import load_workbook
@@ -57,6 +63,34 @@ def decode_text(content: bytes) -> str:
         except UnicodeDecodeError:
             continue
     return content.decode("utf-8", errors="replace")
+
+
+# Шрифты Symbol и Wingdings кодируются в приватной области Unicode (U+F0xx):
+# извлечённый из PDF текст получает вместо «°», «≤», «→» непечатаемые коды,
+# которые портят и цитату, и эмбеддинг фрагмента. Таблица восстанавливает
+# стандартную раскладку Adobe Symbol (код символа + 0xF000)
+_PUA_SYMBOL = {
+    "\uf02d": "\u2212", "\uf044": "\u0394", "\uf061": "\u03b1", "\uf062": "\u03b2",
+    "\uf064": "\u03b4", "\uf065": "\u03b5", "\uf067": "\u03b3", "\uf06c": "\u03bb",
+    "\uf06d": "\u03bc", "\uf070": "\u03c0", "\uf072": "\u03c1", "\uf073": "\u03c3",
+    "\uf074": "\u03c4", "\uf077": "\u03c9", "\uf0a3": "\u2264", "\uf0a5": "\u221e",
+    "\uf0ac": "\u2190", "\uf0ae": "\u2192", "\uf0b0": "\u00b0", "\uf0b1": "\u00b1",
+    "\uf0b3": "\u2265", "\uf0b4": "\u00d7", "\uf0b7": "\u2022", "\uf0b8": "\u00f7",
+    "\uf0b9": "\u2260", "\uf0bb": "\u2248", "\uf0d6": "\u221a", "\uf0d7": "\u00b7",
+    "\uf0e5": "\u03a3", "\uf0fc": "\u2713",
+}
+_PUA_RE = re.compile("[\ue000-\uf8ff]")
+
+
+def sanitize_extracted_text(text: str) -> str:
+    """Восстанавливает символы шрифтов Symbol/Wingdings из приватной области.
+
+    Код, которого нет в таблице, удаляется: он не отображается ни в одном
+    шрифте и несёт не смысл, а сбой извлечения.
+    """
+    if not text or not _PUA_RE.search(text):
+        return text
+    return _PUA_RE.sub(lambda match: _PUA_SYMBOL.get(match.group(0), ""), text)
 
 
 def split_text_blocks(text: str, max_chars: int = 3500) -> list[str]:
@@ -278,7 +312,7 @@ class PdfParser:
         render_doc = None
         with pdfplumber.open(io.BytesIO(content)) as pdf:
             for page_index, page in enumerate(pdf.pages, start=1):
-                text = (page.extract_text() or "").strip()
+                text = sanitize_extracted_text(page.extract_text() or "").strip()
                 image_b64 = None
                 # Порог, а не проверка на пустоту: у скана текстовый слой часто
                 # не пуст (колонтитул, OCR-штамп), но содержимое находится в
@@ -325,6 +359,24 @@ class PdfParser:
         return fragments
 
 
+# Подпись таблицы в отраслевых отчётах: «Таблица 1 - …», «Табл. 2 …», «Table 3 …»
+_TABLE_CAPTION_RE = re.compile(r"^\s*(таблица|табл\.?|table)\s*\d", re.IGNORECASE)
+
+
+def _iter_docx_body(document) -> Iterable:
+    """Абзацы и таблицы в том порядке, в каком они лежат в файле.
+
+    python-docx отдаёт document.paragraphs и document.tables отдельными
+    списками, теряя их взаимное расположение; порядок восстанавливается обходом
+    тела документа.
+    """
+    for child in document.element.body.iterchildren():
+        if child.tag == docx_qn("w:p"):
+            yield DocxParagraph(child, document)
+        elif child.tag == docx_qn("w:tbl"):
+            yield DocxTable(child, document)
+
+
 class DocxParser:
     name = "python-docx"
 
@@ -344,70 +396,91 @@ class DocxParser:
         # У DOCX нет страниц: адрес фрагмента — единый сквозной номер блока,
         # общий для абзацев и табличных строк (иначе адреса конфликтуют)
         block_index = 0
-        # Абзацы сначала собираются в плоский список блоков, затем короткие
+        table_index = 0
+        section = "DOCX evidence unit"
+        # Абзацы накапливаются до ближайшей таблицы или конца документа: короткие
         # (заголовок «Введение», строка оглавления) приклеиваются к следующему
         # содержательному — заголовок становится контекстом абзаца, а не
         # отдельным фрагментом. Раздел каждого блока запоминается параллельно и
         # переносится на склеенный фрагмент.
-        raw: list[tuple[str, str]] = []  # (block, section)
-        section = "DOCX evidence unit"
-        for paragraph in document.paragraphs:
-            text = paragraph.text.strip()
-            if not text:
-                continue
-            style_name = (paragraph.style.name if paragraph.style else "") or ""
-            if style_name.lower().startswith("heading"):
-                section = text[:180]
-            for block in split_text_blocks(text):
-                raw.append((block, section))
-        for block, block_section in _merge_short_with_sections(raw):
-            block_index += 1
-            fragments.append(
-                SourceFragment(
-                    id=f"fragment-{document_id}-docx-p{block_index}",
-                    document_id=document_id,
-                    version_id=version_id,
-                    page=block_index,
-                    element_type="docx_paragraph",
-                    section=block_section,
-                    text=block,
-                    normalized_text=normalize_text(block),
-                    metadata={
-                        "filename": filename,
-                        "paragraph": block_index,
-                        "evidence_unit": True,
-                        "parser": self.name,
-                    },
-                )
-            )
+        pending: list[tuple[str, str]] = []  # (block, section)
 
-        for table_index, table in enumerate(document.tables, start=1):
-            for row_index, row in enumerate(table.rows, start=1):
-                cells = [cell.text.strip().replace("\n", " ") for cell in row.cells if cell.text.strip()]
-                row_text = " | ".join(cells)
-                if not row_text:
-                    continue
+        def flush_paragraphs() -> None:
+            nonlocal block_index, pending
+            for block, block_section in _merge_short_with_sections(pending):
                 block_index += 1
                 fragments.append(
                     SourceFragment(
-                        id=f"fragment-{document_id}-docx-t{table_index}-r{row_index}",
+                        id=f"fragment-{document_id}-docx-p{block_index}",
                         document_id=document_id,
                         version_id=version_id,
                         page=block_index,
-                        element_type="docx_table_row",
-                        section=f"DOCX table {table_index}",
-                        text=row_text,
-                        normalized_text=normalize_text(row_text),
+                        element_type="docx_paragraph",
+                        section=block_section,
+                        text=block,
+                        normalized_text=normalize_text(block),
                         metadata={
                             "filename": filename,
-                            "table": table_index,
-                            "row": row_index,
-                            "ordinal": block_index,
+                            "paragraph": block_index,
                             "evidence_unit": True,
                             "parser": self.name,
                         },
                     )
                 )
+            pending = []
+
+        # Тело документа обходится в порядке вёрстки: абзацы и таблицы идут
+        # вперемешку, как в файле. Раздельный обход (сначала document.paragraphs,
+        # затем document.tables) лишал таблицу и раздела, и подписи — по номеру
+        # блока нельзя было понять, какому тексту таблица принадлежит
+        for item in _iter_docx_body(document):
+            if isinstance(item, DocxTable):
+                # Подпись таблицы — абзац прямо перед ней; для модели это
+                # единственный источник смысла колонок, кроме самой шапки
+                caption = pending[-1][0] if pending else ""
+                if not _TABLE_CAPTION_RE.match(caption):
+                    caption = ""
+                flush_paragraphs()
+                table_index += 1
+                for row_index, row in enumerate(item.rows, start=1):
+                    cells = [sanitize_extracted_text(cell.text).strip().replace("\n", " ")
+                             for cell in row.cells if cell.text.strip()]
+                    row_text = " | ".join(cells)
+                    if not row_text:
+                        continue
+                    block_index += 1
+                    fragments.append(
+                        SourceFragment(
+                            id=f"fragment-{document_id}-docx-t{table_index}-r{row_index}",
+                            document_id=document_id,
+                            version_id=version_id,
+                            page=block_index,
+                            element_type="docx_table_row",
+                            section=caption[:180] or section,
+                            text=row_text,
+                            normalized_text=normalize_text(row_text),
+                            metadata={
+                                "filename": filename,
+                                "table": table_index,
+                                "row": row_index,
+                                "ordinal": block_index,
+                                "caption": caption[:180] or None,
+                                "evidence_unit": True,
+                                "parser": self.name,
+                            },
+                        )
+                    )
+                continue
+
+            text = sanitize_extracted_text(item.text).strip()
+            if not text:
+                continue
+            style_name = (item.style.name if item.style else "") or ""
+            if style_name.lower().startswith("heading"):
+                section = text[:180]
+            for block in split_text_blocks(text):
+                pending.append((block, section))
+        flush_paragraphs()
 
         if not fragments:
             return BinaryPlaceholderParser(reason="DOCX contains no extractable text").parse(
@@ -438,7 +511,7 @@ class PptxParser:
             # отдельных фрагментов). Слайд длиннее 3500 симв. разбивается, но
             # короткие строки не остаются отдельными фрагментами (merge_short_blocks).
             shape_texts = list(_slide_text_shapes(slide.shapes))
-            slide_text = "\n".join(shape_texts).strip()
+            slide_text = sanitize_extracted_text("\n".join(shape_texts)).strip()
             block_index = 0
             if slide_text:
                 for block in merge_short_blocks(split_text_blocks(slide_text)) or [slide_text]:

@@ -68,10 +68,19 @@ def _static_prompt(mode: str = "full") -> str:
     )
 
 
-def build_prompt(fragment_text: str, element_type: str, page: int, mode: str = "full") -> str:
+def build_prompt(
+    fragment_text: str,
+    element_type: str,
+    page: int,
+    mode: str = "full",
+    section: str | None = None,
+) -> str:
+    """Промпт для одного окна. section — заголовок раздела документа: часто
+    именно в нём назван материал, о котором молчит сам абзац."""
     return (
         _static_prompt(mode)
         .replace("{element_type}", element_type)
         .replace("{page}", str(page))
+        .replace("{section}", section or "не указан")
         .replace("{fragment_text}", fragment_text)
     )

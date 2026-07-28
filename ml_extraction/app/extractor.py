@@ -5,6 +5,7 @@ import re
 
 from app import config, prompt, yandex_client
 from app.schemas import ExtractionCandidate, SourceFragment, SourceRef
+from app.windows import Window, attribute_quote, build_windows
 
 log = logging.getLogger(__name__)
 
@@ -20,17 +21,21 @@ _FATAL_KINDS = {"auth", "quota", "unavailable"}
 
 
 async def extract_fragments(fragments: list[SourceFragment]) -> list[ExtractionCandidate]:
+    # Единица извлечения — окно, а не фрагмент: модель должна видеть абзац
+    # в его разделе, а строку таблицы — вместе с шапкой (см. windows.py)
+    batch = build_windows(fragments)
+    log.info("Извлечение: %d фрагментов сгруппированы в %d окон", len(fragments), len(batch))
     # Параллельность ограничивает глобальный семафор в yandex_client:
     # суммарный лимит держится и при нескольких одновременных батчах
-    results = await asyncio.gather(*(_extract_one(f) for f in fragments), return_exceptions=True)
+    results = await asyncio.gather(*(_extract_one(w) for w in batch), return_exceptions=True)
     candidates: list[ExtractionCandidate] = []
-    for fragment, result in zip(fragments, results):
+    for window, result in zip(batch, results):
         if isinstance(result, yandex_client.YandexClientError) and result.kind in _FATAL_KINDS:
             raise result
         if isinstance(result, BaseException):
-            # локальная проблема фрагмента (невалидный JSON, некорректный ответ
+            # локальная проблема окна (невалидный JSON, некорректный ответ
             # модели) изолируется и логируется, батч продолжается
-            log.warning("Фрагмент %s пропущен: %s", fragment.id, result)
+            log.warning("Окно с фрагмента %s пропущено: %s", window.lead.id, result)
             continue
         candidates.extend(result)
     return candidates
@@ -39,32 +44,34 @@ async def extract_fragments(fragments: list[SourceFragment]) -> list[ExtractionC
 _DIGIT_RE = re.compile(r"\d")
 
 
-def _route(fragment: SourceFragment, text: str, image_b64: str | None) -> str:
-    """Предварительный маршрутизатор: определяет, каким разбором обрабатывать фрагмент.
+def _route(window: Window, text: str, image_b64: str | None) -> str:
+    """Предварительный маршрутизатор: определяет, каким разбором обрабатывать окно.
 
     vision — сканы и схемы; full — таблицы и текст с числами (нужны числовые правила
     и словарь терминов); light — простой текст, промпт короче в ~4 раза.
     """
     if image_b64:
         return "vision"
-    if "table" in fragment.element_type or "row" in fragment.element_type:
+    if window.kind == "table":
         return "full"
     if _DIGIT_RE.search(text):
         return "full"
     return "light"
 
 
-async def _extract_one(fragment: SourceFragment) -> list[ExtractionCandidate]:
-    text = (fragment.text or "").strip()
-    image_b64 = fragment.metadata.get("image_b64")
-    route = _route(fragment, text, image_b64)
+async def _extract_one(window: Window) -> list[ExtractionCandidate]:
+    text = window.text
+    lead = window.lead
+    image_b64 = lead.metadata.get("image_b64")
+    route = _route(window, text, image_b64)
 
     if route == "vision":
         # Страница без текстового слоя: извлечение по изображению
         prompt_text = prompt.build_prompt(
             "(текстовый слой отсутствует — извлекай данные с приложенного изображения страницы)",
-            fragment.element_type,
-            fragment.page,
+            window.element_type,
+            lead.page,
+            section=window.section,
         )
         messages = [{
             "role": "user",
@@ -75,10 +82,12 @@ async def _extract_one(fragment: SourceFragment) -> list[ExtractionCandidate]:
         }]
     else:
         if len(text) < config.MIN_FRAGMENT_CHARS:
-            return []  # фрагменты короче порога в модель не отправляются
+            return []  # окна короче порога в модель не отправляются
         messages = [{
             "role": "user",
-            "content": prompt.build_prompt(text[:8000], fragment.element_type, fragment.page, mode=route),
+            "content": prompt.build_prompt(
+                text[:8000], window.element_type, lead.page, mode=route, section=window.section
+            ),
         }]
     data = await yandex_client.chat_json(messages)
 
@@ -88,10 +97,13 @@ async def _extract_one(fragment: SourceFragment) -> list[ExtractionCandidate]:
             continue
         payload = _normalize_claim(claim)
         if payload is None:
-            log.warning("Отброшен невалидный claim из фрагмента %s: %s", fragment.id, str(claim)[:150])
+            log.warning("Отброшен невалидный claim из окна %s: %s", lead.id, str(claim)[:150])
             continue
         confidence = payload.pop("confidence")
         quote = payload.pop("quote", None)
+        # Утверждение возвращается тому фрагменту окна, из которого взята цитата:
+        # ссылка на источник остаётся точной, окно на неё не влияет
+        fragment = attribute_quote(window, quote)
         candidates.append(ExtractionCandidate(
             id=f"candidate-{fragment.id}-{i}",
             type="Claim",
@@ -102,7 +114,7 @@ async def _extract_one(fragment: SourceFragment) -> list[ExtractionCandidate]:
                 fragment_id=fragment.id,
                 page=fragment.page,
                 section=fragment.section,
-                quote=(quote or text)[:220],
+                quote=(quote or fragment.text)[:220],
             ),
             confidence=confidence,
         ))

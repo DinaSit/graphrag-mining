@@ -104,7 +104,10 @@ _UNIT_SPECS, _TARGET_QUANTITIES, _MULTI_CHAR_UNITS = _load_units(DOMAIN_DIR)
 # Односимвольные единицы зависят от регистра и потому заданы шаблоном, а не
 # списком: «С» — Цельсий, «с» — секунды, «В» — предлог и единицей не считается.
 # Градус пишут и слитно, и через пробел
-_SINGLE_CHAR_UNITS = r"%|°\s*[CcСс]|h|ч|m|м|(?-i:[CС])|(?-i:[sс])|(?-i:[VВ])"
+# Знак градуса в отраслевых отчётах часто набран русской буквой «о»: «1538 оС».
+# Ложных срабатываний это не даёт — после единицы _TAIL требует небуквенный
+# символ, поэтому «5 осей» единицей не считается
+_SINGLE_CHAR_UNITS = r"%|[°о]\s*[CcСс]|h|ч|m|м|(?-i:[CС])|(?-i:[sс])|(?-i:[VВ])"
 
 # Составные единицы идут раньше однобуквенных: иначе «м» сопоставляется с началом «м/с»
 _UNITS = "|".join([*(re.escape(a) for a in _MULTI_CHAR_UNITS), _SINGLE_CHAR_UNITS])
@@ -224,6 +227,19 @@ def normalize_for_quantity(value: float, unit: str | None, quantity: str | None)
     return value * spec.to_base * target.from_base, target.unit
 
 
+# Человекочитаемые имена числовых полей: попадают в претензии, которые видит
+# эксперт на карточке кандидата
+_FIELD_LABELS = {
+    "temperature_c": "температура",
+    "duration_h": "длительность",
+    "effect_value": "величина эффекта",
+}
+
+
+def field_label(field: str) -> str:
+    return _FIELD_LABELS.get(field, field)
+
+
 def validate_candidate_numbers(
     payload: dict[str, Any], source_text: str | None, rules: dict[str, Any] | None = None
 ) -> dict[str, Any]:
@@ -235,7 +251,14 @@ def validate_candidate_numbers(
 
     hits = extract_quantity_hits(source_text or "")
     issues: list[str] = []
+    # Та же претензия в разборном виде: код, поле и формулировка для эксперта.
+    # По коду интерфейс фильтрует очередь, по полю подсвечивает нужную строку формы
+    detail: list[dict[str, str]] = []
     matched_fields: list[str] = []
+
+    def add(code: str, field: str, label: str, message: str) -> None:
+        issues.append(message)
+        detail.append({"code": code, "field": field, "label": label})
 
     field_rules = [
         ("temperature_c", "temperature", 1.0),
@@ -248,7 +271,9 @@ def validate_candidate_numbers(
         if any(hit.kind == kind and abs(hit.normalized_value - value) <= tolerance for hit in hits):
             matched_fields.append(field)
         elif source_text:
-            issues.append(f"{field}={value:g} не найдено в source evidence regex+unit validation")
+            add("number_unconfirmed", field,
+                f"{field_label(field)} {value:g} не найдена в тексте источника",
+                f"{field}={value:g} не найдено в source evidence regex+unit validation")
 
     # Эффект сверяется в его собственной единице (м/с, мг/л, HV),
     # а не как безусловные проценты; без единицы считаем эффект процентами
@@ -260,7 +285,9 @@ def validate_candidate_numbers(
         if _value_seen_in_source(effect_value, hits, unit=effect_unit, source_text=source_text or "", tolerance=0.1):
             matched_fields.append("effect_value")
         elif source_text:
-            issues.append(f"effect_value={effect_value:g} не найдено в source evidence regex+unit validation")
+            add("number_unconfirmed", "effect_value",
+                f"величина эффекта {effect_value:g} не найдена в тексте источника",
+                f"effect_value={effect_value:g} не найдено в source evidence regex+unit validation")
 
     if rules:
         # Правдоподобие проверяется по имени параметра: объединённые
@@ -288,7 +315,10 @@ def validate_candidate_numbers(
                 _value_seen_in_source(value, hits, unit=unit, quantity=quantity, source_text=source_text)
                 for value in values
             ):
-                issues.append(f"«{param.get('name') or param.get('type') or 'numeric_parameter'}»={values} не найдено в source evidence")
+                name = str(param.get("name") or param.get("type") or "параметр")
+                add("number_unconfirmed", name,
+                    f"«{name}» {values} не найдено в тексте источника",
+                    f"«{name}»={values} не найдено в source evidence")
             if bounds is None:
                 continue
             low, high = bounds
@@ -302,15 +332,20 @@ def validate_candidate_numbers(
                 else:
                     normalized_values.append(converted[0])
             if failed_conversion:
-                issues.append(f"«{param.get('name')}»={values} не удалось привести к единице правила")
+                add("unit_mismatch", str(param.get("name")),
+                    f"«{param.get('name')}» {values}: единица не приводится к правилу",
+                    f"«{param.get('name')}»={values} не удалось привести к единице правила")
                 continue
             if any(not (low <= value <= high) for value in normalized_values):
                 unit_label = normalize_for_quantity(values[0], unit, quantity)[1] if values and quantity else str(unit or "")
-                issues.append(f"«{param.get('name')}»={normalized_values} {unit_label} вне диапазона {low:g}-{high:g}")
+                add("number_implausible", str(param.get("name")),
+                    f"«{param.get('name')}» {normalized_values} {unit_label} вне диапазона правдоподобия {low:g}–{high:g}",
+                    f"«{param.get('name')}»={normalized_values} {unit_label} вне диапазона {low:g}-{high:g}")
 
     return {
         "validated": not issues,
         "issues": issues,
+        "issues_detail": detail,
         "matched_fields": matched_fields,
         "quantities": [hit.__dict__ for hit in hits],
     }

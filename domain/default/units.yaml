@@ -18,7 +18,7 @@ units:
     unit: C
     dimension: temperature
     to_base: 1.0
-    aliases: ["c", "°c", "с", "°с"]
+    aliases: ["c", "°c", "с", "°с", "ос", "oc"]
 
   duration:
     unit: h

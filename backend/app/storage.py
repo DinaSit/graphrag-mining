@@ -14,15 +14,17 @@ import logging
 import os
 import random
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from app.file_storage import PREVIEW_SUFFIX, MinioFileStorage
 from app.persistence import Neo4jSink, PostgresSink
 from app.pipeline import hydration
 from app.pipeline.document_traits import classify_document_llm, detect_origin, extract_publication_year
-from app.pipeline.fact_builder import SourceRequiredError, candidate_quality_issues, fact_from_candidate
+from app.pipeline.fact_builder import SourceRequiredError, candidate_field_issues, fact_from_candidate
 from app.pipeline.graph_view import build_graph
 from app.pipeline.normalization import (
     DomainNormalizer,
@@ -62,6 +64,36 @@ log = logging.getLogger(__name__)
 __all__ = ["ApplicationStore", "SourceRequiredError"]
 
 
+def _row_ordinal(fragment: SourceFragment) -> int:
+    """Номер строки внутри таблицы; без него порядок строк восстановить нечем."""
+    try:
+        return int((fragment.metadata or {}).get("row"))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _row_values_with_units(header: str, row: str) -> str:
+    """Пары «значение единица» из строки таблицы по шапке той же колонки.
+
+    Проверка чисел ищет единицу вплотную к числу, а в таблице единица задана
+    заголовком колонки («Температура, оС») и стоит в другом фрагменте. Пары
+    собираются только при совпадении числа колонок: парсер отбрасывает пустые
+    ячейки, и при расхождении длин значение попало бы под чужую единицу.
+    """
+    heads = [cell.strip() for cell in header.split("|")]
+    cells = [cell.strip() for cell in row.split("|")]
+    if len(heads) < 2 or len(heads) != len(cells):
+        return ""
+    pairs = []
+    for head, cell in zip(heads, cells):
+        if "," not in head or not cell:
+            continue
+        unit = head.rsplit(",", 1)[1].strip()
+        if unit:
+            pairs.append(f"{cell} {unit}")
+    return "\n".join(pairs)
+
+
 class ApplicationStore:
     def __init__(
         self,
@@ -93,6 +125,8 @@ class ApplicationStore:
         self.fragments: dict[str, SourceFragment] = {}
         self.candidates: dict[str, ExtractionCandidate] = {}
         self.facts: dict[str, Fact] = {}
+        # Шапка таблицы по (document_id, номер таблицы): нужна проверке чисел
+        self._table_headers: dict[tuple[str, str], str] = {}
         # Идентификаторы фрагментов, у которых эмбеддинг посчитан. Сами векторы
         # хранит PostgreSQL (таблица fragment_vectors) — близость считает pgvector
         # своим индексом, в память они не поднимаются; здесь нужен только ответ
@@ -131,6 +165,7 @@ class ApplicationStore:
 
     def add_source_fragment(self, fragment: SourceFragment) -> None:
         self.fragments[fragment.id] = fragment
+        self._table_headers.clear()
         self._persist_fragments([fragment])
 
     # --- Признаки документа и PDF-превью ---
@@ -357,6 +392,7 @@ class ApplicationStore:
             document.element_count = len(fragments)
             for fragment in fragments:
                 self.fragments[fragment.id] = fragment
+                self._table_headers.clear()
             self._persist_fragments(fragments)
             self.persist_document(document, version)
 
@@ -427,7 +463,12 @@ class ApplicationStore:
                     if not self._document_alive(document_id):
                         return accepted
                     existing = self.candidates.get(candidate.id)
-                    if existing is not None and existing.status == CandidateStatus.rejected:
+                    # Решение эксперта сильнее пере-извлечения: отклонённые и
+                    # правленные руками кандидаты моделью не перезаписываются
+                    if existing is not None and (
+                        existing.status == CandidateStatus.rejected
+                        or existing.payload.get("edited_by_human")
+                    ):
                         continue
                     self.add_candidate(candidate)
                     accepted += 1
@@ -460,6 +501,31 @@ class ApplicationStore:
 
     # --- Кандидаты и факты ---
 
+    def _table_header(self, fragment: SourceFragment | None) -> str:
+        """Первая строка той же таблицы — та, где заданы названия колонок и единицы.
+
+        Кэш сбрасывается вместе с добавлением фрагментов: состав таблиц меняется
+        только при разборе документа.
+        """
+        if fragment is None or fragment.element_type != "docx_table_row":
+            return ""
+        table = (fragment.metadata or {}).get("table")
+        if table is None:
+            return ""
+        key = (fragment.document_id, str(table))
+        if key not in self._table_headers:
+            rows = [
+                other for other in self.fragments.values()
+                if other.document_id == fragment.document_id
+                and other.element_type == "docx_table_row"
+                and str((other.metadata or {}).get("table")) == str(table)
+            ]
+            header = min(rows, key=_row_ordinal, default=None)
+            self._table_headers[key] = header.text if header else ""
+        header_text = self._table_headers[key]
+        # Для самой шапки контекст не нужен: она и есть фрагмент
+        return "" if header_text == fragment.text else header_text
+
     def add_candidate(self, candidate: ExtractionCandidate) -> ExtractionCandidate:
         # Прежнее состояние нужно, чтобы поймать понижение: кандидат мог быть
         # утверждён раньше, и его факт обязан уйти вместе со статусом
@@ -469,7 +535,18 @@ class ApplicationStore:
             # до 220 символов и заведомо не содержит всех значений
             fragment = self.fragments.get(candidate.source.fragment_id)
             fragment_text = fragment.text if fragment else ""
-            source_text = fragment_text or candidate.source.quote or ""
+            # В таблице единица измерения стоит в шапке колонки, а не рядом со
+            # значением, и попадает в отдельный фрагмент. Без шапки число из
+            # ячейки нельзя опознать как температуру или расход — и проверка
+            # чисел отвергала бы верные значения
+            header_text = self._table_header(fragment)
+            source_text = "\n".join(
+                part for part in (
+                    header_text,
+                    fragment_text,
+                    _row_values_with_units(header_text, fragment_text),
+                ) if part
+            ) or candidate.source.quote or ""
             candidate.payload["number_validation"] = validate_candidate_numbers(
                 candidate.payload, source_text, self.validation_rules
             )
@@ -486,19 +563,11 @@ class ApplicationStore:
         # становится фактом сам; хоть одна не пройдена — идёт к эксперту с
         # названной причиной. Автоотклонения нет: выбрасывать утверждение,
         # которого человек не видел, нечем оправдать
-        number_validation = candidate.payload.get("number_validation", {})
-        issues = candidate_quality_issues(candidate.payload)
-        if candidate.source is None:
-            # Инвариант системы: факт существует только со ссылкой на первоисточник
-            issues.append("нет ссылки на source fragment")
-        elif candidate.payload.get("quote_validated") is not True:
-            issues.append("цитата не подтверждена текстом источника")
-        if not number_validation.get("validated", True):
-            # «Ошибки в числах недопустимы»: сомнительные числа не проходят в граф
-            issues.append("числа не подтверждены: " + "; ".join(number_validation.get("issues", [])[:3]))
+        issues = self._review_issues(candidate)
+        candidate.payload["review_issues"] = issues
         if issues:
             candidate.status = CandidateStatus.pending_review
-            candidate.review_note = "Кандидат требует проверки: " + "; ".join(issues)
+            candidate.review_note = "Кандидат требует проверки: " + "; ".join(i["label"] for i in issues)
         else:
             candidate.status = CandidateStatus.approved
             candidate.review_note = None
@@ -512,6 +581,50 @@ class ApplicationStore:
             # остаётся факт, который система сама считает непроверенным
             self.unapprove_candidate(candidate.id, candidate.review_note)
         return candidate
+
+    def _review_issues(self, candidate: ExtractionCandidate) -> list[dict[str, str]]:
+        """Все претензии к кандидату в разборном виде: код, поле, формулировка.
+
+        По коду интерфейс фильтрует очередь, по полю подсвечивает строку формы.
+        Пустой список означает, что кандидат проходит ворота и станет фактом.
+        """
+        issues = candidate_field_issues(candidate.payload)
+        if candidate.source is None:
+            # Инвариант системы: факт существует только со ссылкой на первоисточник
+            issues.append({"code": "source_missing", "field": "source",
+                           "label": "нет ссылки на фрагмент-источник"})
+        elif candidate.payload.get("quote_validated") is not True:
+            issues.append({"code": "quote_unconfirmed", "field": "quote",
+                           "label": "цитата не подтверждена текстом источника"})
+        issues.extend((candidate.payload.get("number_validation") or {}).get("issues_detail", []))
+        return issues
+
+    # Поля кандидата, которые эксперт правит в очереди. Цитата и источник в список
+    # НЕ входят намеренно: правка цитаты обесценила бы проверку «цитата есть в
+    # документе» — её можно было бы подогнать под факт
+    EDITABLE_FIELDS = (
+        "material", "property", "process", "sample", "lab", "team", "equipment",
+        "temperature_c", "duration_h", "effect_direction", "effect_value", "effect_unit",
+        "result_value", "result_unit",
+    )
+
+    def update_candidate_fields(self, candidate_id: str, fields: dict[str, Any]) -> ExtractionCandidate:
+        """Правка полей кандидата экспертом с повторным прогоном проверок.
+
+        Правка живёт в кандидате, а не в факте: иначе повторная обработка
+        документа затёрла бы работу эксперта. Помеченный правкой кандидат
+        пере-извлечением не перезаписывается (см. reprocess_document).
+        """
+        candidate = self.candidates[candidate_id]
+        unknown = set(fields) - set(self.EDITABLE_FIELDS)
+        if unknown:
+            raise ValueError("Недопустимые поля: " + ", ".join(sorted(unknown)))
+        for field, value in fields.items():
+            candidate.payload[field] = value
+        candidate.payload["edited_by_human"] = True
+        # add_candidate перепроверит числа и поля, пересчитает ворота и,
+        # если всё сошлось, сам создаст факт
+        return self.add_candidate(candidate)
 
     def approve_candidate(self, candidate_id: str) -> Fact:
         candidate = self.candidates[candidate_id]
@@ -618,13 +731,35 @@ class ApplicationStore:
 
     # --- Семантический индекс и поиск ---
 
+    def _embed_chunk(self, chunk: list[SourceFragment], attempts: int = 3) -> list[list[float]]:
+        """Векторы пачки фрагментов с повтором при обрыве.
+
+        Сервис эмбеддингов может перезапуститься под нагрузкой (модель занимает
+        около 2 ГБ), и одиночный обрыв не должен оставлять документ частично
+        проиндексированным. Исчерпав попытки, ошибка выбрасывается наружу:
+        вызывающий слой обязан пометить обработку failed, а не отчитаться об
+        успехе с непроиндексированными фрагментами.
+        """
+        texts = [fragment.normalized_text for fragment in chunk]
+        for attempt in range(1, attempts + 1):
+            try:
+                return self.embedder.embed(texts)
+            except Exception as exc:  # noqa: BLE001 — важен любой обрыв, не только сетевой
+                if attempt == attempts:
+                    log.error("Эмбеддинги: пачка не посчитана за %d попыток: %s", attempts, exc)
+                    raise
+                pause = 2 ** attempt
+                log.warning("Эмбеддинги: обрыв (%s), повтор через %d с", exc, pause)
+                time.sleep(pause)
+        return []  # недостижимо: цикл либо возвращает вектор, либо выбрасывает
+
     def index_fragments(self, fragments: list[SourceFragment]) -> None:
         # Пачками: большой документ не укладывается в таймаут одного запроса,
         # а результат фиксируется по мере готовности, а не в конце.
         # 16 длинных фрагментов на CPU укладываются в таймаут с запасом
         for start in range(0, len(fragments), 16):
             chunk = fragments[start : start + 16]
-            vectors = self.embedder.embed([fragment.normalized_text for fragment in chunk])
+            vectors = self._embed_chunk(chunk)
             new_vectors: dict[str, list[float]] = {}
             for fragment, vector in zip(chunk, vectors):
                 new_vectors[fragment.id] = vector
