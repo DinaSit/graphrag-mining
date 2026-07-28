@@ -671,8 +671,7 @@ class Neo4jSink:
         if not self.enabled:
             return
         self._write("MATCH (c:Claim {id: $fact_id}) DETACH DELETE c", {"fact_id": fact_id})
-        self._write("MATCH (e:Experiment) WHERE NOT (e)<-[:BASED_ON]-() DETACH DELETE e", {})
-        self._write("MATCH (n) WHERE NOT (n)--() DELETE n", {})
+        self._drop_unsupported_nodes()
 
     def delete_document(self, document_id: str, claim_ids: list[str]) -> None:
         """Удаляет из графа узлы документа и осиротевшие вершины."""
@@ -682,9 +681,29 @@ class Neo4jSink:
                     {"document_id": document_id})
         self._write("MATCH (c:Claim) WHERE c.id IN $claim_ids DETACH DELETE c",
                     {"claim_ids": claim_ids})
-        # Эксперименты без единого утверждения и вершины без связей — сироты
-        self._write("MATCH (e:Experiment) WHERE NOT (e)<-[:BASED_ON]-() DETACH DELETE e", {})
-        self._write("MATCH (n) WHERE NOT (n)--() DELETE n", {})
+        self._drop_unsupported_nodes()
+
+    def _drop_unsupported_nodes(self) -> None:
+        """Удаляет вершины, до которых не дотягивается ни одно утверждение.
+
+        Прежнее правило считало сиротой только вершину вообще без связей.
+        Материалы, процессы и свойства связаны и между собой, поэтому переживали
+        удаление всех своих утверждений и оставались в графе призраками —
+        смысловым слоем без единого источника. Живой считается вершина,
+        достижимая от Claim по исходящим связям (глубина покрывает цепочку
+        Claim → Experiment → Property и связи сущностей между собой).
+        """
+        self._write(
+            """
+            MATCH (n)
+            WHERE NOT n:Claim AND NOT n:SourceFragment
+              AND NOT EXISTS { MATCH (:Claim)-[*1..4]->(n) }
+            DETACH DELETE n
+            """,
+            {},
+        )
+        # Фрагмент без единого утверждения принадлежит документу и остаётся;
+        # удаляется он только вместе с документом (см. delete_document)
 
     def _write(self, query: str, params: dict[str, Any]) -> None:
         try:

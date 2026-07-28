@@ -27,6 +27,12 @@ services:
     environment:
       NEO4J_AUTH: neo4j/graphrag-demo
       NEO4J_PLUGINS: '["apoc"]'
+      # Без явных границ Neo4j подбирает heap и page cache по объёму хозяйской
+      # памяти и занимает ~740 МБ. Граф корпуса — тысячи вершин, ему хватает
+      # много меньшего, а освобождённое нужно модели эмбеддингов (~2 ГБ)
+      NEO4J_server_memory_heap_initial__size: 256m
+      NEO4J_server_memory_heap_max__size: 512m
+      NEO4J_server_memory_pagecache_size: 128m
     ports:
       - "7474:7474"
       - "7687:7687"
