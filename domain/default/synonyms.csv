@@ -302,3 +302,5 @@ MIW,Mining Influenced Water,Material
 рециркуляция,recirculation,Process
 обеднение,slag cleaning,Process
 обеднение,cleaning,Process
+pH,рн,Property
+CaO,СаО,Material

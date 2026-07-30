@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +28,7 @@ def _read_yaml(path: Path) -> dict[str, Any]:
 
 def load_validation_rules(domain_dir: Path) -> dict[str, Any]:
     """Читает domain/default/validation-rules.yaml: диапазоны правдоподобия
-    числовых параметров (владелец — инженер знаний)."""
+    числовых параметров."""
     rules: dict[str, Any] = {
         "ranges_by_name": {},
         "quantity_by_name": {},
@@ -61,6 +61,10 @@ class UnitSpec:
     unit: str
     dimension: str
     to_base: float
+    # Смещение нуля шкалы в базовых единицах: приведение аффинное,
+    # base = value * to_base + offset. Для всех единиц кроме шкал температуры
+    # смещение нулевое и формула сводится к прежнему умножению
+    offset: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -71,8 +75,8 @@ class TargetQuantity:
 
 
 def _load_units(domain_dir: Path) -> tuple[dict[str, UnitSpec], dict[str, TargetQuantity], list[str]]:
-    """Читает domain/default/units.yaml: приведение единиц к базовым (владелец —
-    инженер знаний). Возвращает таблицу алиасов, базовые единицы величин и
+    """Читает domain/default/units.yaml: приведение единиц к базовым.
+    Возвращает таблицу алиасов, базовые единицы величин и
     многосимвольные алиасы для шаблона поиска."""
     specs: dict[str, UnitSpec] = {}
     quantities: dict[str, TargetQuantity] = {}
@@ -80,7 +84,8 @@ def _load_units(domain_dir: Path) -> tuple[dict[str, UnitSpec], dict[str, Target
     data = _read_yaml(domain_dir / "units.yaml")
     for kind, item in (data.get("units") or {}).items():
         spec = UnitSpec(str(item.get("kind") or kind), str(item["unit"]),
-                        str(item["dimension"]), float(item["to_base"]))
+                        str(item["dimension"]), float(item["to_base"]),
+                        float(item.get("offset") or 0.0))
         for alias in item.get("aliases") or []:
             specs[str(alias).lower()] = spec
             # Односимвольные в шаблон не идут: они зависят от регистра и
@@ -107,7 +112,7 @@ _UNIT_SPECS, _TARGET_QUANTITIES, _MULTI_CHAR_UNITS = _load_units(DOMAIN_DIR)
 # Знак градуса в отраслевых отчётах часто набран русской буквой «о»: «1538 оС».
 # Ложных срабатываний это не даёт — после единицы _TAIL требует небуквенный
 # символ, поэтому «5 осей» единицей не считается
-_SINGLE_CHAR_UNITS = r"%|[°о]\s*[CcСс]|h|ч|m|м|(?-i:[CС])|(?-i:[sс])|(?-i:[VВ])"
+_SINGLE_CHAR_UNITS = r"%|[°о]\s*[CcСс]|h|ч|m|м|(?-i:[CС])|(?-i:[sс])|(?-i:[VВ])|(?-i:[KК])"
 
 # Составные единицы идут раньше однобуквенных: иначе «м» сопоставляется с началом «м/с»
 _UNITS = "|".join([*(re.escape(a) for a in _MULTI_CHAR_UNITS), _SINGLE_CHAR_UNITS])
@@ -151,14 +156,14 @@ def extract_quantity_hits(text: str) -> list[QuantityHit]:
     for match in RANGE_RE.finditer(text):
         consumed.append(match.span())
         raw_unit = match.group("unit").replace(" ", "")
-        hits.append(_make_hit(match.group("value1"), raw_unit))
-        hits.append(_make_hit(match.group("value2"), raw_unit))
+        hits.extend(_hits_for(match.group("value1"), raw_unit))
+        hits.extend(_hits_for(match.group("value2"), raw_unit))
     for match in NUMBER_UNIT_RE.finditer(text):
         start, end = match.span()
         # Совпадения внутри уже разобранных диапазонов повторно не обрабатываются
         if any(start < c_end and c_start < end for c_start, c_end in consumed):
             continue
-        hits.append(_make_hit(match.group("value"), match.group("unit").replace(" ", "")))
+        hits.extend(_hits_for(match.group("value"), match.group("unit").replace(" ", "")))
     for match in PH_RE.finditer(text):
         raw_value = _parse_number(match.group("value"))
         hits.append(QuantityHit(raw_value, "pH", "dimensionless", raw_value, "pH"))
@@ -166,6 +171,23 @@ def extract_quantity_hits(text: str) -> list[QuantityHit]:
             second = _parse_number(match.group("value2"))
             hits.append(QuantityHit(second, "pH", "dimensionless", second, "pH"))
     return hits
+
+
+def _hits_for(raw_value: str, raw_unit: str) -> list[QuantityHit]:
+    """Показания одного совпадения «число + единица».
+
+    У шкалы со смещённым нулём (кельвины) одно и то же написание означает две
+    разные величины, и по тексту они неразличимы: «нагрев до 323 K» — абсолютная
+    температура (50 °C), «снижение на 300 K» — разность температур (300 °C).
+    Поэтому для таких единиц выдаются оба прочтения: сверка чисел подтверждает
+    значение, если оно совпало с любым из них. Отбрасывать одно из прочтений
+    нельзя — это отвергало бы верные значения.
+    """
+    hit = _make_hit(raw_value, raw_unit)
+    spec = _unit_spec(_resolve_unit_alias(raw_unit))
+    if spec is None or not spec.offset:
+        return [hit]
+    return [hit, replace(hit, normalized_value=hit.normalized_value - spec.offset)]
 
 
 def _make_hit(raw_value: str, raw_unit: str) -> QuantityHit:
@@ -224,7 +246,7 @@ def normalize_for_quantity(value: float, unit: str | None, quantity: str | None)
         return value, target.unit
     if spec.dimension != target.dimension:
         return None
-    return value * spec.to_base * target.from_base, target.unit
+    return (value * spec.to_base + spec.offset) * target.from_base, target.unit
 
 
 # Человекочитаемые имена числовых полей: попадают в претензии, которые видит
