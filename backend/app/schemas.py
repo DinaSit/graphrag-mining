@@ -5,8 +5,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-# Типы узлов доменной онтологии (domain/default/ontology.yaml, владелец —
-# инженер знаний). Единственный источник для whitelist меток Neo4j
+# Типы узлов доменной онтологии (domain/default/ontology.yaml).
+# Единственный источник whitelist меток Neo4j
 # (persistence.Neo4jSink) и схемы Query Planner (query_parsing).
 ONTOLOGY_LABELS = (
     "Material", "Process", "Equipment", "Property", "NumericParameter", "Condition",
@@ -67,6 +67,9 @@ class DocumentRecord(BaseModel):
     # Год издания: имя файла имеет приоритет над текстом (см.
     # extract_publication_year); None — год не найден или ещё не вычислен
     year: int | None = None
+    # Авторы с титульного листа в виде «Фамилия И.О.» (см. extract_authors);
+    # пустой список — не найдены или ещё не вычислены
+    authors: list[str] = Field(default_factory=list)
 
 
 class DocumentVersion(BaseModel):
@@ -170,6 +173,10 @@ class ExperimentRow(BaseModel):
     temperature_c: float | None
     duration_h: float | None
     property: str
+    # Измеренное значение с единицей — то, ради чего факт извлекался; заполнено
+    # у подавляющего большинства фактов, в отличие от эффекта и лаборатории
+    result_value: float | None = None
+    result_unit: str | None = None
     effect: str
     lab: str
     confidence: float
@@ -237,6 +244,10 @@ class ParsedQuestion(BaseModel):
     process: str | None = None
     equipment: str | None = None
     region: str | None = None
+    # Границы года издания документа-источника (включительно); None — без
+    # ограничения. «За последние 5 лет» планировщик переводит в year_min
+    year_min: int | None = None
+    year_max: int | None = None
     entities: list[QueryEntity] = Field(default_factory=list)
     conditions: list[QueryCondition] = Field(default_factory=list)
     target: QueryCondition | None = None

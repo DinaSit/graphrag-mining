@@ -13,6 +13,7 @@ import hashlib
 import logging
 import os
 import random
+import re
 import threading
 import time
 from datetime import datetime, timezone
@@ -23,7 +24,12 @@ from uuid import uuid4
 from app.file_storage import PREVIEW_SUFFIX, MinioFileStorage
 from app.persistence import Neo4jSink, PostgresSink
 from app.pipeline import hydration
-from app.pipeline.document_traits import classify_document_llm, detect_origin, extract_publication_year
+from app.pipeline.document_traits import (
+    classify_document_llm,
+    detect_origin,
+    extract_authors,
+    extract_publication_year,
+)
 from app.pipeline.fact_builder import SourceRequiredError, candidate_field_issues, fact_from_candidate
 from app.pipeline.graph_view import build_graph
 from app.pipeline.normalization import (
@@ -72,26 +78,68 @@ def _row_ordinal(fragment: SourceFragment) -> int:
         return 0
 
 
-def _row_values_with_units(header: str, row: str) -> str:
-    """Пары «значение единица» из строки таблицы по шапке той же колонки.
+# Заголовок колонки-подписи: за ним идут не значения, а имена параметров
+_LABEL_HEADS = ("показател", "наименован", "параметр", "характеристик")
 
-    Проверка чисел ищет единицу вплотную к числу, а в таблице единица задана
-    заголовком колонки («Температура, оС») и стоит в другом фрагменте. Пары
-    собираются только при совпадении числа колонок: парсер отбрасывает пустые
-    ячейки, и при расхождении длин значение попало бы под чужую единицу.
+
+def _label_unit(label: str) -> str:
+    """Единица измерения из подписи колонки или строки: после последней запятой
+    («Температура, оС»), а без запятой — начиная с символа единицы («t°C» → «°C»)."""
+    if "," in label:
+        return label.rsplit(",", 1)[1].strip()
+    match = re.search(r"[°%]", label)
+    return label[match.start():].strip() if match else ""
+
+
+def _row_values_with_units(header: str, row: str) -> str:
+    """Пары «значение единица» из строки таблицы.
+
+    Проверка чисел ищет единицу вплотную к числу, а в таблице она стоит в
+    другой ячейке — и в другом фрагменте. Разбираются три раскладки, все три
+    встречаются в корпусе:
+      A. единица в заголовке колонки:      «Температура, оС» | «Расход, л/мин»
+      B. таблица транспонирована — в шапке объекты сравнения, имя параметра и
+         единица в первой ячейке строки:   «t°C | 60 | 60»
+      C. единица вынесена отдельной колонкой «Единицы измерения»
+    Пары собираются только при согласованном числе ячеек: парсер отбрасывает
+    пустые, и при расхождении длин значение попало бы под чужую единицу.
     """
     heads = [cell.strip() for cell in header.split("|")]
     cells = [cell.strip() for cell in row.split("|")]
-    if len(heads) < 2 or len(heads) != len(cells):
+    if len(heads) < 2:
         return ""
-    pairs = []
-    for head, cell in zip(heads, cells):
-        if "," not in head or not cell:
-            continue
-        unit = head.rsplit(",", 1)[1].strip()
+
+    def paired(cells_: list[str], unit: str, skip: int = -1) -> str:
+        # Единица приписывается только ячейке с числом: номер по порядку и
+        # название параметра тоже стоят в строке, и «Плотность тока А/м2» — мусор
+        return "\n".join(f"{cell} {unit}" for i, cell in enumerate(cells_)
+                         if i != skip and any(char.isdigit() for char in cell))
+
+    # Строка длиннее шапки на одну ячейку: слева либо подпись строки (B), либо
+    # номер по порядку — тогда шапка описывает ячейки начиная со второй
+    if len(cells) == len(heads) + 1:
+        unit = _label_unit(cells[0])
         if unit:
-            pairs.append(f"{cell} {unit}")
-    return "\n".join(pairs)
+            return paired(cells[1:], unit)
+        cells = cells[1:]
+    if len(heads) != len(cells):
+        return ""
+    # B при совпадающей длине: первая колонка шапки — «Показатель»/«Параметр»,
+    # то есть подпись строки, а единица снова стоит в первой ячейке строки
+    if any(word in heads[0].lower() for word in _LABEL_HEADS):
+        unit = _label_unit(cells[0])
+        if unit:
+            return paired(cells[1:], unit)
+    # C: колонка единиц задаёт единицу для всех значений своей строки
+    unit_column = next(
+        (i for i, head in enumerate(heads) if "единиц" in head.lower() or "unit" in head.lower()),
+        None,
+    )
+    if unit_column is not None and cells[unit_column]:
+        return paired(cells, cells[unit_column], skip=unit_column)
+    # A
+    return "\n".join(f"{cell} {_label_unit(head)}" for head, cell in zip(heads, cells)
+                     if _label_unit(head) and any(char.isdigit() for char in cell))
 
 
 class ApplicationStore:
@@ -105,8 +153,8 @@ class ApplicationStore:
     ):
         self.domain_dir = domain_dir
         self.normalizer = DomainNormalizer(domain_dir)
-        # Диапазоны правдоподобия чисел — из validation-rules.yaml (владелец —
-        # инженер знаний). Порогов по самооценке модели больше нет: судьбу
+        # Диапазоны правдоподобия чисел — из validation-rules.yaml.
+        # Порогов по самооценке модели нет: судьбу
         # кандидата решают проверки, см. add_candidate
         self.validation_rules = load_validation_rules(domain_dir)
         # Извлечение возможно только через сервис: заглушки нет намеренно —
@@ -163,19 +211,15 @@ class ApplicationStore:
         fragments.sort(key=lambda f: (f.page, f.id))
         return fragments
 
-    def add_source_fragment(self, fragment: SourceFragment) -> None:
-        self.fragments[fragment.id] = fragment
-        self._table_headers.clear()
-        self._persist_fragments([fragment])
-
     # --- Признаки документа и PDF-превью ---
 
     def apply_traits(self, document: DocumentRecord, fragments: list[SourceFragment]) -> bool:
-        """Пересчитывает признаки документа: происхождение и год (эвристики) +
-        тип/научность/обоснование (LLM). Возвращает True, если LLM дала вердикт;
-        при недоступной LLM прежние тип/научность не затираются."""
+        """Пересчитывает признаки документа: происхождение, год и авторы
+        (эвристики) + тип/научность/обоснование (LLM). Возвращает True, если LLM
+        дала вердикт; при недоступной LLM прежние тип/научность не затираются."""
         document.origin = detect_origin(fragments)
         document.year = extract_publication_year(fragments, document.filename)
+        document.authors = extract_authors(fragments)
         traits = classify_document_llm(fragments, document.filename)
         if traits is None:
             return False
@@ -704,6 +748,31 @@ class ApplicationStore:
         property_name = self.normalizer.normalize_entity(fact.property) or fact.property
         return canonical_text(material), canonical_text(property_name)
 
+    def _regions_of(self, fact: Fact) -> list[dict[str, str]]:
+        """Регионы утверждения — по тексту фрагмента-источника, а не по цитате:
+        страну называет обычно соседнее предложение («практика заводов Канады…»),
+        а не сама измеряемая величина. Фрагмент — связный кусок одного раздела,
+        поэтому названная в нём страна и есть контекст утверждения.
+
+        Считается при каждой проекции в граф и нигде не хранится: словарь
+        регионов меняется чаще, чем факты, и повторная проекция сразу даёт
+        актуальную привязку.
+        """
+        fragment = self.fragments.get(fact.source.fragment_id)
+        if fragment is None:
+            return []
+        return [{"type": "Region", "name": name}
+                for name in self.normalizer.regions.regions_in(fragment.text)]
+
+    def _experts_of(self, fact: Fact) -> list[dict[str, str]]:
+        """Авторы документа-источника как носители компетенции по этому
+        утверждению. Привязка идёт от документа, а не от фрагмента: авторство
+        относится к работе целиком, разделить вклад по абзацам нечем."""
+        document = self.documents.get(fact.source.document_id)
+        if document is None:
+            return []
+        return [{"type": "Expert", "name": name} for name in document.authors]
+
     def _project_semantics(self, fact: Fact, candidate: ExtractionCandidate) -> None:
         """Переносит извлечённые сущности и связи онтологии из payload в Neo4j."""
         if not self.graph_sink:
@@ -715,6 +784,7 @@ class ApplicationStore:
             if isinstance(item, dict)
         ]
         entities = [entity for entity in entities if entity["name"]]
+        entities += self._regions_of(fact) + self._experts_of(fact)
         # Ребро, у которого имя одного из концов — заглушка, также не проецируется
         relations = [
             {

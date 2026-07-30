@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from app.pipeline.normalization import canonical_text
 from app.pipeline.validation import normalize_for_quantity, normalize_quantity
 from app.schemas import CandidateStatus, ParsedQuestion
 
@@ -78,15 +79,43 @@ def _template_numeric_parameter(store: ApplicationStore, parameter_name: str) ->
     return result
 
 
+# «Зарубежная практика» — не название страны, а всё, что не Россия: вопрос
+# «в России и за рубежом» иначе не разложить на регионы
+_FOREIGN_MARKERS = ("рубеж", "мировой практик", "мировая практик", "иностран", "abroad", "foreign")
+_DOMESTIC_MARKERS = ("отечествен", "росси", "рф")
+
+
+def _region_names(store: ApplicationStore, region_name: str) -> list[str] | None:
+    """Список регионов, которые имел в виду вопрос. None — искать по вхождению
+    названия (обычная страна)."""
+    folded = canonical_text(region_name)
+    index = store.normalizer.regions
+    if any(marker in folded for marker in _FOREIGN_MARKERS):
+        return index.foreign
+    if any(marker in folded for marker in _DOMESTIC_MARKERS):
+        return index.domestic
+    return None
+
+
 def _template_region(store: ApplicationStore, region_name: str) -> set[str]:
     """Шаблон 3: Region -> Claim'ы, упоминающие решения/публикации в этом регионе."""
-    query = """
-    MATCH (r:Region) WHERE toLower(r.name) CONTAINS toLower($region)
-    MATCH (c:Claim)-[:MENTIONS]->(r)
-    RETURN DISTINCT c.id AS claim_id
-    LIMIT $limit
-    """
-    rows = store.graph_sink.run_read(query, {"region": region_name, "limit": GRAPH_LIMIT})
+    names = _region_names(store, region_name)
+    if names is not None:
+        query = """
+        MATCH (c:Claim)-[:MENTIONS]->(r:Region) WHERE r.name IN $names
+        RETURN DISTINCT c.id AS claim_id
+        LIMIT $limit
+        """
+        params: dict[str, Any] = {"names": names, "limit": GRAPH_LIMIT}
+    else:
+        query = """
+        MATCH (r:Region) WHERE toLower(r.name) CONTAINS toLower($region)
+        MATCH (c:Claim)-[:MENTIONS]->(r)
+        RETURN DISTINCT c.id AS claim_id
+        LIMIT $limit
+        """
+        params = {"region": region_name, "limit": GRAPH_LIMIT}
+    rows = store.graph_sink.run_read(query, params)
     return {row["claim_id"] for row in rows if row.get("claim_id")}
 
 

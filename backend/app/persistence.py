@@ -36,7 +36,7 @@ _DOC_COLUMNS = (
     "id", "filename", "document_type", "source_label", "access_level", "checksum",
     "current_version_id", "status", "element_count", "storage_bucket", "storage_object",
     "storage_uri", "created_at", "hidden", "is_scientific", "origin", "year",
-    "preview_object", "doc_type", "trait_reason",
+    "preview_object", "doc_type", "trait_reason", "authors",
 )
 
 
@@ -44,6 +44,7 @@ def _document_from_row(row: tuple) -> DocumentRecord:
     """Строка БД (в порядке _DOC_COLUMNS) → DocumentRecord."""
     data = dict(zip(_DOC_COLUMNS, row))
     data["hidden"] = bool(data["hidden"])
+    data["authors"] = data.get("authors") or []
     return DocumentRecord(**data)
 
 
@@ -65,6 +66,9 @@ _FACT_COLUMNS = (
     "result_value", "result_unit", "lab", "team", "equipment", "confidence", "status",
     "is_hypothesis", "conflicts_with", "source",
 )
+
+# Колонки JSONB: значение сериализуется и передаётся с приведением ::jsonb
+_FACT_JSONB = ("conflicts_with", "source")
 
 
 def _fact_from_row(row: tuple) -> Fact:
@@ -97,7 +101,9 @@ class PostgresSink:
             if column not in ("id", "checksum", "created_at")
         )
         values = tuple(
-            document.status.value if column == "status" else getattr(document, column)
+            document.status.value if column == "status"
+            else json.dumps(document.authors, ensure_ascii=False) if column == "authors"
+            else getattr(document, column)
             for column in _DOC_COLUMNS
         )
         self._execute(
@@ -208,47 +214,35 @@ class PostgresSink:
         )
 
     def upsert_fact(self, fact: Fact) -> None:
+        """Запись факта. SQL выводится из _FACT_COLUMNS: новое поле факта не
+        требует правки этого метода.
+
+        При конфликте по id обновляются ВСЕ колонки, кроме ключей. Факт
+        пересобирается из кандидата с тем же идентификатором после правки
+        эксперта и после повторной обработки документа — обновляй запрос лишь
+        часть полей, исправленное значение осталось бы только в памяти процесса
+        и терялось при перезапуске.
+        """
         if not self.enabled:
             return
+        columns = ", ".join(_FACT_COLUMNS)
+        placeholders = ", ".join(
+            "%s::jsonb" if column in _FACT_JSONB else "%s" for column in _FACT_COLUMNS
+        )
+        updates = ", ".join(
+            f"{column} = EXCLUDED.{column}" for column in _FACT_COLUMNS
+            if column not in ("id", "candidate_id")
+        )
+        values = tuple(
+            json.dumps(fact.source.model_dump(mode="json"), ensure_ascii=False) if column == "source"
+            else json.dumps(getattr(fact, column), ensure_ascii=False) if column in _FACT_JSONB
+            else getattr(fact, column)
+            for column in _FACT_COLUMNS
+        )
         self._execute(
-            """
-            INSERT INTO facts (
-              id, candidate_id, material, material_id, experiment_id, sample, process, temperature_c, duration_h,
-              property, effect_direction, effect_value, effect_unit, result_value, result_unit, lab, team, equipment,
-              confidence, status, is_hypothesis, conflicts_with, source
-            )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)
-            ON CONFLICT (id) DO UPDATE SET
-              confidence = EXCLUDED.confidence,
-              status = EXCLUDED.status,
-              conflicts_with = EXCLUDED.conflicts_with,
-              source = EXCLUDED.source
-            """,
-            (
-                fact.id,
-                fact.candidate_id,
-                fact.material,
-                fact.material_id,
-                fact.experiment_id,
-                fact.sample,
-                fact.process,
-                fact.temperature_c,
-                fact.duration_h,
-                fact.property,
-                fact.effect_direction,
-                fact.effect_value,
-                fact.effect_unit,
-                fact.result_value,
-                fact.result_unit,
-                fact.lab,
-                fact.team,
-                fact.equipment,
-                fact.confidence,
-                fact.status,
-                fact.is_hypothesis,
-                json.dumps(fact.conflicts_with, ensure_ascii=False),
-                json.dumps(fact.source.model_dump(mode="json"), ensure_ascii=False),
-            ),
+            f"INSERT INTO facts ({columns}) VALUES ({placeholders}) "
+            f"ON CONFLICT (id) DO UPDATE SET {updates}",
+            values,
         )
 
     def upsert_vectors(self, vectors: dict[str, list[float]], embedding_model: str) -> None:
@@ -299,6 +293,7 @@ class PostgresSink:
             # NULL — ещё не классифицирован (LLM была недоступна)
             "ALTER TABLE documents ADD COLUMN IF NOT EXISTS doc_type TEXT",
             "ALTER TABLE documents ADD COLUMN IF NOT EXISTS trait_reason TEXT",
+            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS authors JSONB NOT NULL DEFAULT '[]'::jsonb",
             "ALTER TABLE facts ADD COLUMN IF NOT EXISTS conflicts_with JSONB NOT NULL DEFAULT '[]'::jsonb",
             # Индекс векторного поиска: близость считает PostgreSQL, а не backend
             "CREATE INDEX IF NOT EXISTS fragment_vectors_embedding_idx ON fragment_vectors USING hnsw (embedding vector_cosine_ops)",

@@ -1,0 +1,74 @@
+# Географическая привязка утверждений.
+#
+# Регион утверждения определяется по упоминаниям в тексте фрагмента-источника:
+# название страны, её предприятий или городов однозначно относит описанную
+# практику к этой стране. Гранулярность — страна: требование ТЗ формулируется
+# как «отечественная практика против зарубежной», поэтому Норильск и Кольский
+# полуостров считаются маркерами России, а не отдельными регионами.
+#
+# Маркер сопоставляется как НАЧАЛО слова без учёта регистра (ё приводится к е),
+# поэтому «росси» покрывает «России», «российский», «россиян». Маркеры длиннее
+# и специфичнее общеупотребительных слов: короткий маркер даст ложные
+# срабатывания (например «инди» совпало бы с «индивидуальных»).
+#
+# domestic: true ровно у одной записи — она отвечает на «отечественная
+# практика», все прочие составляют «зарубежную» (см. graph_traversal).
+
+- name: Россия
+  domestic: true
+  markers: [росси, отечествен, норильск, талнах, надеждинск, заполярный филиал,
+            кольск, мончегорск, печенг, красноярск, nornik, norilsk]
+
+- name: Канада
+  markers: [канад, canada, sudbury, copper cliff, thompson, inco, falconbridge]
+
+- name: Норвегия
+  markers: [норвеж, норвеги, norway, nikkelverk, kristiansand]
+
+- name: Финляндия
+  markers: [финлянд, финск, finland, harjavalta, outokumpu, kokkola, aalto]
+
+- name: Япония
+  markers: [япон, japan, niihama, sumitomo, toyo smelter]
+
+- name: Китай
+  markers: [китай, китае, китая, китайск, china, jinchuan]
+
+- name: Чили
+  markers: [чили, chile, caletones, chuquicamata, codelco, teniente]
+
+- name: Замбия
+  markers: [замби, zambia, nkana, rokana, медного пояса, copperbelt]
+
+- name: ЮАР
+  markers: [юар, south africa, rustenburg, waterval, anglo american]
+
+- name: США
+  markers: [сша, u.s.a, united states, кеннекотт, kennecott]
+
+- name: Германия
+  markers: [германи, немецк, germany, aurubis, norddeutsche]
+
+- name: Австралия
+  markers: [австрали, australia, kalgoorlie, olympic dam]
+
+- name: Бразилия
+  markers: [бразил, brazil, onca puma]
+
+- name: Польша
+  markers: [польш, польск, poland, kghm, glogow, legnica]
+
+- name: Казахстан
+  markers: [казахстан, kazakhstan, балхаш, жезказган]
+
+- name: Ботсвана
+  markers: [ботсван, botswana, selebi]
+
+- name: Индонезия
+  markers: [индонези, indonesia, soroako, weda bay]
+
+- name: Зимбабве
+  markers: [зимбабв, zimbabwe, bindura]
+
+- name: Конго
+  markers: [конго, congo, katanga, катанг]

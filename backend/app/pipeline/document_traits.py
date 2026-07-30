@@ -88,6 +88,64 @@ def _title_pages_text(fragments: list[SourceFragment]) -> tuple[str, str]:
     return head[:4000], tail[:1200]
 
 
+# --- Авторы -----------------------------------------------------------------
+# Записи ФИО, встречающиеся на титульных листах корпуса: «Косов Я.И.»,
+# «Л.Б. Цымбулов», «Затицкий Борис Эдуардович», «D.M. Bogatyrev». Инициалы или
+# полное отчество обязательны: без них фамилией стало бы любое слово с заглавной
+# буквы, а титульный лист состоит из названий, грифов и должностей.
+_SURNAME = r"[А-ЯЁ][а-яё]+(?:-[А-ЯЁ][а-яё]+)?"
+_INITIALS = r"[А-ЯЁ]\.\s?[А-ЯЁ]\."
+# Порядок групп в каждом шаблоне задаётся явно, а не угадывается по точкам
+_AUTHOR_PATTERNS = (
+    (re.compile(rf"\b({_SURNAME})\s+({_INITIALS})"), "surname_initials"),
+    (re.compile(rf"\b({_INITIALS})\s*({_SURNAME})\b"), "initials_surname"),
+    (re.compile(r"\b([A-Z]\.\s?[A-Z]\.)\s*([A-Z][a-z]+)"), "initials_surname"),
+    (re.compile(rf"\b({_SURNAME})\s+([А-ЯЁ])[а-яё]+\s+([А-ЯЁ])[а-яё]*"
+                r"(?:ович|евич|овна|евна|ична|инична)\b"), "full_name"),
+)
+# Слова, формально проходящие как фамилия: должности и грифы стоят на тех же
+# строках, что и инициалы («УТВЕРЖДАЮ Директор ... ___ С.М.»)
+_NOT_SURNAME = frozenset({
+    "утверждаю", "согласовано", "директор", "руководитель", "исполнитель", "начальник",
+    "заместитель", "главный", "ведущий", "старший", "младший", "специалист", "инженер",
+    "научный", "департамент", "департамента", "институт", "лаборатория", "отдел", "цех",
+    "работ", "автор", "авторы", "реферат", "обзор", "отчет", "введение", "содержание",
+    "оглавление", "заключение", "аннотация", "приложение", "приложения", "литература",
+    "список", "таблица", "рисунок", "раздел", "глава",
+})
+_AUTHORS_LIMIT = 12
+# Титульный лист: у DOCX «страница» — счётчик блоков, поэтому берутся первые
+# фрагменты, а не первые страницы (иначе титул сводится к паре строк)
+_AUTHOR_HEAD_FRAGMENTS = 25
+_AUTHOR_HEAD_CHARS = 6000
+
+
+def extract_authors(fragments: list[SourceFragment]) -> list[str]:
+    """Авторы документа по титульному листу. Эвристика без LLM; вид записи
+    приводится к единому «Фамилия И.О.», повторы одной фамилии схлопываются.
+
+    Признак справочный, как и год: ошибка не критична, зато носитель
+    компетенции перестаёт быть невидимым. Полнота ограничена титульным листом —
+    авторов, названных только в списке литературы, здесь нет.
+    """
+    head = " ".join(f.text for f in fragments[:_AUTHOR_HEAD_FRAGMENTS])[:_AUTHOR_HEAD_CHARS]
+    found: dict[str, str] = {}   # фамилия в нижнем регистре → показываемое имя
+    for pattern, order in _AUTHOR_PATTERNS:
+        for match in pattern.finditer(head):
+            if order == "surname_initials":
+                surname, initials = match.group(1), match.group(2)
+            elif order == "initials_surname":
+                surname, initials = match.group(2), match.group(1)
+            else:  # full_name: фамилия + имя + отчество → инициалы из первых букв
+                surname, initials = match.group(1), f"{match.group(2)}.{match.group(3)}."
+            if surname.lower() in _NOT_SURNAME:
+                continue
+            found.setdefault(surname.lower(), f"{surname} {' '.join(initials.split())}")
+            if len(found) >= _AUTHORS_LIMIT:
+                return list(found.values())
+    return list(found.values())
+
+
 def classify_document_llm(fragments: list[SourceFragment], filename: str | None = None) -> dict | None:
     """Тип документа и научность через LLM (каскад ml-extraction /chat_json).
 

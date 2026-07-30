@@ -111,6 +111,27 @@ def merge_unique(*fact_lists: list[Fact]) -> list[Fact]:
     return merged
 
 
+def in_year_range(store: ApplicationStore, document_id: str, parsed: ParsedQuestion) -> bool:
+    """Попадает ли документ-источник в заданный вопросом диапазон лет.
+
+    Документ без года не проходит: подтвердить попадание нечем, а показать
+    его как ответ «за последние 5 лет» значило бы выдать непроверенное за
+    проверенное. Сколько материала отсеяно, сообщает find_gaps.
+    """
+    if parsed.year_min is None and parsed.year_max is None:
+        return True
+    document = store.documents.get(document_id)
+    year = document.year if document else None
+    if year is None:
+        return False
+    return ((parsed.year_min is None or year >= parsed.year_min)
+            and (parsed.year_max is None or year <= parsed.year_max))
+
+
+def filter_by_year(store: ApplicationStore, facts: list[Fact], parsed: ParsedQuestion) -> list[Fact]:
+    return [f for f in facts if in_year_range(store, f.source.document_id, parsed)]
+
+
 def rank_fact(normalizer: DomainNormalizer, parsed: ParsedQuestion):
     material_key = entity_key(normalizer, parsed.material)
     property_key = entity_key(normalizer, parsed.property)
@@ -158,7 +179,8 @@ def row_from_fact(fact: Fact) -> ExperimentRow:
     return ExperimentRow(
         experiment_id=fact.experiment_id, material=fact.material, sample=fact.sample,
         process=fact.process, temperature_c=fact.temperature_c, duration_h=fact.duration_h,
-        property=fact.property, effect=value, lab=fact.lab, confidence=fact.confidence, source=fact.source,
+        property=fact.property, result_value=fact.result_value, result_unit=fact.result_unit,
+        effect=value, lab=fact.lab, confidence=fact.confidence, source=fact.source,
     )
 
 
