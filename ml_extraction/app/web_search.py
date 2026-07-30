@@ -1,4 +1,4 @@
-"""Поиск ответа во внешних научных источниках (зона ML-A).
+"""Поиск ответа во внешних научных источниках.
 
 Используется как последняя ступень ответа: когда в базе знаний данных нет,
 система сообщает об этом и ищет по списку источников, заданному
@@ -378,11 +378,17 @@ def _fallback_query(question: str) -> str:
     return _simplify(question) or question.strip()
 
 
-def _sources_only(hits: list[dict], message: str) -> dict:
+def _sources_only(hits: list[dict], message: str | None = None, kind: str | None = None) -> dict:
     """Ответ «источники без сводки»: LLM не дала связного текста (ошибка или
-    отказ), но найденное ВСЕГДА доходит до пользователя."""
+    отказ), но найденное ВСЕГДА доходит до пользователя.
+
+    Отказ модели передаётся кодом (kind) — формулировку для пользователя
+    подбирает backend. Прозой (message) сообщается лишь то, что отказом не
+    является: модель ответила, но связного текста не написала.
+    """
     return {"found": True, "answer": None, "url": hits[0].get("href"),
-            "snippets": _results_payload(hits[:5]), "llm_error": message}
+            "snippets": _results_payload(hits[:5]),
+            "llm_error": message, "llm_error_kind": kind}
 
 
 async def _ddgs_results(question: str, domains: list[str] | None = None) -> tuple[list[dict], str]:
@@ -513,19 +519,24 @@ async def answer_from_web(question: str, results: list[dict] | None = None,
             timeout=llm_timeout + 2,
         )
     except (asyncio.TimeoutError, yandex_client.YandexClientError, json.JSONDecodeError, ValueError) as exc:
-        # error_text: пустой str(exc) заменяется именем типа — причина не теряется
-        message = (f"LLM-сводка веб-результатов не уложилась в бюджет {llm_timeout + 2:.0f} с"
-                   if isinstance(exc, asyncio.TimeoutError) else yandex_client.error_text(exc))
-        log.error("Генерация веб-ответа не удалась: %s", message)
-        return _sources_only(hits, message[:300])
+        # Наружу уходит только код причины; полный текст провайдера — в лог,
+        # где он и нужен для разбора
+        kind = getattr(exc, "kind", None) or (
+            "unavailable" if isinstance(exc, asyncio.TimeoutError) else "bad_response")
+        log.error("Генерация веб-ответа не удалась (%s): %s", kind, yandex_client.error_text(exc))
+        return _sources_only(hits, kind=kind)
 
-    if not data.get("found") or not data.get("answer"):
-        # Модель отказалась от сводки (осторожный false у reasoning-моделей —
-        # частый случай), однако выдача найдена: источники не отбрасываются,
+    answer = str(data.get("answer") or "").strip()
+    if not answer:
+        # Сводки нет вовсе, но выдача найдена: источники не отбрасываются,
         # пользователь получает их списком без связного текста — как при
         # недоступной LLM, только без ошибки
         return _sources_only(hits, "модель не составила связную сводку — ниже найденные источники")
-    # Ссылка должна существовать в выдаче, а не быть сочинённой моделью
+    # Флаг found намеренно не проверяется. Reasoning-модели трактуют его как
+    # «нашёл ли я запрошенную величину», а не «относятся ли выдержки к теме»,
+    # и на вопросах о конкретном числе ставят false, написав при этом
+    # полноценную сводку. Судим по тексту, а не по флагу: иначе готовый ответ
+    # выбрасывался бы, а сообщение «сводка не составлена» говорило бы неправду
     urls = {h.get("href") for h in hits}
     url = data.get("url") if data.get("url") in urls else hits[0].get("href")
-    return {"found": True, "answer": data["answer"], "url": url, "snippets": _results_payload(hits[:5])}
+    return {"found": True, "answer": answer, "url": url, "snippets": _results_payload(hits[:5])}

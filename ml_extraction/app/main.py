@@ -1,6 +1,6 @@
-"""Сервис извлечения фактов на базе Yandex AI Studio (зона ML-A).
+"""Сервис извлечения фактов на базе Yandex AI Studio.
 
-Реализует контракт ml-mock: POST /extract {fragments} → {candidates}.
+Контракт: POST /extract {fragments} → {candidates}.
 Подключается к backend через EXTRACTION_SERVICE_URL
 (см. docker-compose.override.yml в корне репозитория).
 """

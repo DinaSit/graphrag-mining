@@ -1,7 +1,7 @@
 """Копии контрактных моделей из backend/app/schemas.py (зона fullstack).
 
 Сервис намеренно самодостаточен и не импортирует backend: контракт /extract
-зафиксирован структурой ExtractRequest/ExtractResponse, как в ml_mock.
+зафиксирован структурой ExtractRequest/ExtractResponse.
 При изменении схем в backend — синхронизировать вручную.
 """
 from typing import Any
@@ -85,6 +85,9 @@ class WebAnswerResponse(BaseModel):
     # публикации из научных API (int | None); у ddgs-выдачи года нет (None)
     snippets: list[dict[str, Any]] = Field(default_factory=list)
     llm_error: str | None = None
+    # Причина отказа модели кодом (auth / quota / bad_response / unavailable):
+    # формулировку для пользователя подбирает backend, сервис прозой не говорит
+    llm_error_kind: str | None = None
 
 
 class EmbedRequest(BaseModel):

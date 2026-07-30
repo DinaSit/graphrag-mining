@@ -61,20 +61,20 @@ def fact_from_candidate(normalizer: DomainNormalizer, candidate: ExtractionCandi
     )
 
 
-def candidate_quality_issues(payload: dict[str, Any]) -> list[str]:
-    """Причины, по которым кандидат не может быть утверждён автоматически.
-    Значение-заглушка ('не указано', 'unknown'…) считается неизвлечённым —
-    список заглушек общий с КГ (is_junk_label), иначе «нет данных» прошло бы
-    проверку качества."""
+# Поля, без которых утверждение бессмысленно: о чём и что именно утверждается
+_REQUIRED_FIELDS = (("material", "материал"), ("property", "свойство"))
+
+
+def candidate_field_issues(payload: dict[str, Any]) -> list[dict[str, str]]:
+    """Незаполненные обязательные поля в разборном виде: код, поле, формулировка."""
     def missing(value: Any) -> bool:
         return value is None or is_junk_label(str(value))
 
-    issues: list[str] = []
-    if missing(payload.get("material")):
-        issues.append("material не извлечён")
-    if missing(payload.get("property")):
-        issues.append("property не извлечён")
-    return issues
+    return [
+        {"code": "field_missing", "field": field, "label": f"{name} не извлечён" if field == "material"
+         else f"{name} не извлечено"}
+        for field, name in _REQUIRED_FIELDS if missing(payload.get(field))
+    ]
 
 
 # Проверки извлечения, из которых складывается уверенность факта. Все три
@@ -86,7 +86,7 @@ def extraction_confidence(payload: dict[str, Any]) -> float:
 
     1. Цитата найдена в тексте фрагмента-источника.
     2. Числа факта подтверждены текстом источника (чисел нет — проверка пройдена).
-    3. Извлечены ключевые поля: материал и свойство.
+    3. Извлечены ключевые поля: материал и свойство (candidate_field_issues).
 
     Проверка, которую не удалось выполнить (нет фрагмента в сторе), считается
     непройденной: «не проверено» — это не «проверено».
@@ -96,6 +96,6 @@ def extraction_confidence(payload: dict[str, Any]) -> float:
         passed += 1
     if (payload.get("number_validation") or {}).get("validated", True):
         passed += 1
-    if not candidate_quality_issues(payload):
+    if not candidate_field_issues(payload):
         passed += 1
     return round(passed / 3, 3)

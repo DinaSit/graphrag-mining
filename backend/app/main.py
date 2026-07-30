@@ -7,7 +7,7 @@ import mimetypes
 import os
 import threading
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
@@ -209,7 +209,7 @@ async def web_sources() -> dict:
 
 @app.post("/web/answer")
 async def web_answer(request: WebAnswerProxyRequest) -> dict:
-    """Независимый контур веб-поиска (контракт К1): выполняется ВСЕГДА по
+    """Независимый контур веб-поиска: выполняется ВСЕГДА по
     явному запросу UI (решение пользователя), а не только когда база не
     ответила. Прокси в ml-extraction /web_answer; схема ответа 1:1 повторяет
     WebAnswerResponse сервиса: {"found", "answer", "url", "snippets", "llm_error"}."""
@@ -238,12 +238,15 @@ async def web_answer(request: WebAnswerProxyRequest) -> dict:
         return _web_answer_failure(f"веб-поиск не уложился в таймаут {timeout:.0f} с")
     except (httpx.HTTPError, ValueError) as exc:
         return _web_answer_failure(f"веб-поиск недоступен: {exc.__class__.__name__}")
+    # Отказ модели сервис передаёт кодом — формулировку для пользователя даёт
+    # общий словарь, тот же, что и у ответа по базе знаний
+    kind = payload.get("llm_error_kind")
     return {
         "found": bool(payload.get("found")),
         "answer": payload.get("answer"),
         "url": payload.get("url"),
         "snippets": payload.get("snippets") or [],
-        "llm_error": payload.get("llm_error"),
+        "llm_error": LLMUnavailableError(str(kind), "").human() if kind else payload.get("llm_error"),
     }
 
 
@@ -257,7 +260,7 @@ async def ask(request: QueryRequest):
 
 
 def _sse_event(name: str, payload: dict) -> str:
-    """Формат события контракта К1: "event: <имя>\\ndata: <json одной строкой>\\n\\n"."""
+    """Формат SSE-события: "event: <имя>\\ndata: <json одной строкой>\\n\\n"."""
     return f"event: {name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
@@ -281,7 +284,7 @@ def _parse_llm_json(text: str) -> dict:
 
 
 async def _ask_stream_events(request: QueryRequest):
-    """SSE-поток контракта К1: "evidence" -> "delta"... -> "final" (всегда последним)."""
+    """SSE-поток ответа: "evidence" -> "delta"... -> "final" (всегда последним)."""
     # Вопрос вне предметной области: сразу единственное событие final
     if orchestrator.is_offtopic(request.question):
         yield _sse_event("final", orchestrator.offtopic_response().model_dump(mode="json"))
@@ -337,7 +340,7 @@ async def _ask_stream_events(request: QueryRequest):
 
 @app.post("/ask/stream")
 async def ask_stream(request: QueryRequest):
-    """Стриминговый вариант /ask (контракт К1): та же обработка вопросов вне
+    """Стриминговый вариант /ask: та же обработка вопросов вне
     предметной области, но summary отдаётся частями по мере генерации."""
     return StreamingResponse(_ask_stream_events(request), media_type="text/event-stream")
 
@@ -558,6 +561,23 @@ def approve_fact(candidate_id: str):
     try:
         return store.approve_candidate(candidate_id)
     except SourceRequiredError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+class CandidateFieldsRequest(BaseModel):
+    # Значения полей факта; допустимый список — ApplicationStore.EDITABLE_FIELDS
+    fields: dict[str, Any]
+
+
+@app.patch("/review/facts/{candidate_id}")
+def edit_candidate(candidate_id: str, body: CandidateFieldsRequest):
+    """Правка полей кандидата экспертом: проверки прогоняются заново, и если
+    кандидат начинает проходить ворота — он тут же становится фактом."""
+    if candidate_id not in store.candidates:
+        raise HTTPException(status_code=404, detail="Candidate not found")
+    try:
+        return store.update_candidate_fields(candidate_id, body.fields)
+    except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
 

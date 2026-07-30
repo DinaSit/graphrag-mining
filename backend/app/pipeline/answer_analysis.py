@@ -103,7 +103,7 @@ def degraded_summary(facts: list[Fact], search_hits, has_direct_facts: bool, llm
 
 def evidence_status(has_direct_facts: bool, related_facts, search_hits) -> str:
     """Статус доказательной базы: прямые факты / смежные-поиск / пусто.
-    Единая точка для финального ответа и SSE-предпросмотра (контракт К1):
+    Единая точка для финального ответа и SSE-предпросмотра:
     единственная реализация исключает расхождение встроенных копий условия."""
     if has_direct_facts:
         return "direct"

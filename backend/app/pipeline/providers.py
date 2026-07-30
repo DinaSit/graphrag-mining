@@ -9,10 +9,8 @@ import threading
 import urllib.error
 import urllib.request
 from collections import OrderedDict
-from typing import Any
 
-from app.pipeline.normalization import float_or_none
-from app.schemas import ExtractionCandidate, SourceRef, SourceFragment
+from app.schemas import ExtractionCandidate, SourceFragment
 
 
 class DeterministicEmbeddingProvider:

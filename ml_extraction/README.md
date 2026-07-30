@@ -1,8 +1,8 @@
 # ML Extraction Service
 
-Сервис извлечения фактов, эмбеддингов и веб-поиска (порт 8002, зона ML-A).
-Заменяет `ml-mock`: контракт `POST /extract {fragments} → {candidates}` сохранён,
-извлечение выполняет LLM через Yandex AI Studio (OpenAI-совместимый API).
+Сервис извлечения фактов, эмбеддингов и веб-поиска (порт 8002).
+Контракт: `POST /extract {fragments} → {candidates}`; извлечение выполняет LLM
+через Yandex AI Studio (OpenAI-совместимый API).
 Код backend не меняется: подключение — через `EXTRACTION_SERVICE_URL`
 (см. `docker-compose.override.yml`).
 
@@ -57,6 +57,10 @@ YANDEX_FOLDER_ID=<folder id>
 app/
   main.py                 FastAPI: эндпоинты из таблицы выше
   extractor.py            извлечение: фрагменты → LLM → кандидаты
+  windows.py              группировка фрагментов в окна перед вызовом модели:
+                          текст — окнами ~2500 символов, таблица — целиком,
+                          страницы-сканы — по одной; цитата привязывается
+                          обратно к конкретному фрагменту окна
   prompt.py               сборка промпта из domain/default; режимы full и light
   prompts/                шаблоны промптов извлечения (полный и облегчённый)
   yandex_client.py        клиент Yandex AI Studio: chat/chat_json/chat_stream,

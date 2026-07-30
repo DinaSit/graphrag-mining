@@ -149,6 +149,7 @@ class QueryOrchestrator:
         facts: list[Fact] = []
         numeric_evidence: list[dict[str, Any]] = []
         claim_ids: set[str] = set()
+        dropped_by_year = 0
         if parsed is not None:
             claim_ids = graph_traversal.graph_traverse(self.store, parsed)
             # Claim'ы из Neo4j сверяются с видимостью: граф при скрытии
@@ -161,6 +162,9 @@ class QueryOrchestrator:
                 self.store.normalizer, self.store.visible_facts(), request, parsed
             )
             facts = fact_selection.merge_unique(graph_facts, legacy_facts)
+            facts_before_year = len(facts)
+            facts = fact_selection.filter_by_year(self.store, facts, parsed)
+            dropped_by_year = facts_before_year - len(facts)
             facts = sorted(facts, key=fact_selection.rank_fact(self.store.normalizer, parsed), reverse=True)
             numeric_evidence = graph_traversal.numeric_condition_matches(self.store, parsed, claim_ids)
 
@@ -168,6 +172,18 @@ class QueryOrchestrator:
             search_hits = await search_task
         except Exception:
             search_hits = []
+        # Срок из вопроса ограничивает ВЕСЬ материал ответа, а не только факты:
+        # фрагмент из документа вне диапазона — такой же неподходящий источник
+        if parsed is not None:
+            search_hits = [
+                hit for hit in search_hits
+                if fact_selection.in_year_range(self.store, hit.source.document_id, parsed)
+            ]
+            numeric_evidence = [
+                m for m in numeric_evidence
+                if m["source"] is None
+                or fact_selection.in_year_range(self.store, m["source"].document_id, parsed)
+            ]
         self._attach_filenames(search_hits)
 
         has_direct_facts = bool(facts or numeric_evidence)
@@ -175,11 +191,17 @@ class QueryOrchestrator:
         hypotheses: list[str] = []
         if not has_direct_facts and parsed is not None:
             related_facts, hypotheses = fact_selection.indirect_search(self.store, parsed)
+            related_facts = fact_selection.filter_by_year(self.store, related_facts, parsed)
 
         experiments = [fact_selection.row_from_fact(fact) for fact in facts[:20]]
         sources = fact_selection.collect_sources(facts)
         contradictions = answer_analysis.find_contradictions(self.store.normalizer, facts)
         gaps = answer_analysis.find_gaps(parsed, facts, numeric_evidence)
+        # Отсев по сроку не должен быть незаметным: иначе ответ выглядит бедным
+        # без объяснения, почему часть базы в него не вошла
+        if dropped_by_year:
+            gaps.append(f"По заданному сроку издания отброшено фактов: {dropped_by_year} "
+                        f"(включая источники, у которых год не определён).")
         graph = self.store.get_graph(facts=facts[:20])
         confidence = fact_selection.mean_confidence(facts)
         evidence_pack, citation_index = evidence_module.build_evidence_pack(
@@ -267,10 +289,10 @@ class QueryOrchestrator:
         # варианты могли стать одинаковыми
         hypotheses = list(dict.fromkeys(citations.strip_hypothesis_prefix(text) for text in hypotheses))
 
-        # Процитированные фрагменты из ВИДИМЫХ секций (summary/contradictions/gaps/
-        # hypotheses; confirmed UI не показывает). По ним не режется список
-        # источников (инфобокс показывает полноту) — они нужны для сносок,
-        # научности и сборки смежного графа.
+        # Процитированные фрагменты из ВИДИМЫХ секций (summary, contradictions,
+        # gaps, hypotheses). По ним не режется список источников (инфобокс
+        # показывает полноту) — они нужны для сносок, научности и сборки
+        # смежного графа.
         cited_texts = [summary, *contradictions, *gaps, *hypotheses]
         cited = citations.cited_sources(self.store, cited_texts, sources)
 
@@ -380,7 +402,7 @@ class QueryOrchestrator:
         )
 
     def evidence_preview(self, evidence: CollectedEvidence) -> dict[str, Any]:
-        """Полезная нагрузка SSE-события "evidence" (контракт К1): всё, что
+        """Полезная нагрузка SSE-события "evidence": всё, что
         готово до генерации, в формате полей QueryResponse."""
         related_experiments, related_sources, related_graph = self._related_views(evidence.related_facts)
         status = answer_analysis.evidence_status(
@@ -397,6 +419,10 @@ class QueryOrchestrator:
             "related_graph": related_graph.model_dump(mode="json"),
             "contradictions": evidence.contradictions,
             "gaps": evidence.gaps,
+            # Гипотезы косвенного поиска готовы до генерации (indirect_search) —
+            # ждать модель, чтобы их показать, незачем; её собственные
+            # добавляются к этим в finalize
+            "hypotheses": evidence.hypotheses,
             "confidence": evidence.confidence,
             "has_direct_facts": evidence.has_direct_facts,
             "evidence_status": status,
