@@ -1,4 +1,5 @@
 import { respOf } from './article_stream.js';
+import { saveArticle } from './article_store.js';
 import { TOC_SECTIONS, viewArticle } from './article_toc.js';
 import { $, apiJSON, clear, el, extLink, trunc } from './dom.js';
 import { hideFnpop } from './footnote_popup.js';
@@ -23,6 +24,7 @@ export function globeBtn(st){
 
 export function toggleWebMode(st){
   st.webMode = !st.webMode;
+  saveArticle(st);
   applyWebMode(st);
 }
 
@@ -257,20 +259,31 @@ export function linkifiedParagraphs(text){
   return frag;
 }
 
-// какие секции уже «есть» (для оглавления)
+// Все найденные факты одной таблицей. Backend делит их на прямые и смежные по
+// вердикту модели (sufficient), но интерфейс это деление не показывает: списки
+// не пересекаются, при sufficient=false прямые пусты, а смежные заполнены
+export function foundExperiments(r){
+  return [].concat(r.experiments || [], r.related_experiments || []);
+}
+
+// какие секции уже «есть» (для оглавления). Все считаются по respOf, то есть
+// показываются с предпросмотра: противоречия, пробелы и гипотезы вычисляются
+// механически до генерации, а формулировки модели добавляются к ним в финале
 export function sectionCounts(st){
   const r = respOf(st);
-  const done = st.phase === 'done';
-  const partial = (r.evidence_status === 'partial');
   return {
     ans: 1,
     conf: (r.contradictions || []).length,
-    gaps: done ? (r.gaps || []).length : 0,
-    hyp: done ? (r.hypotheses || []).length : 0,
-    facts: (r.experiments || []).length,
-    rel: partial ? (r.related_experiments || []).length : 0,
+    gaps: (r.gaps || []).length,
+    hyp: (r.hypotheses || []).length,
+    facts: foundExperiments(r).length,
     notes: st.notes.length,
   };
+}
+
+// Заголовок секции — единый и для оглавления, и для документа
+export function sectionTitle(key){
+  return (TOC_SECTIONS.find(item => item[0] === key) || [])[1] || '';
 }
 
 export function paintToc(st){

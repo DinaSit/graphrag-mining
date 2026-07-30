@@ -201,14 +201,13 @@ export function attachGraphHover(svg, edges){
 
 export function openGraphOverlay(st){
   closeGraphOverlay();
-  const dg = displayGraph(st);
-  const g = dg.graph;
+  const g = displayGraph(st);
   const ov = el('div', 'goverlay');
   ov.id = 'goverlay';
   const panel = el('div', 'panel');
   const cap = el('div', 'cap');
-  const title = dg.related ? 'Граф смежных данных' : 'Окрестность графа';
-  cap.append(el('span', 't', title + ' · ' + (g.nodes || []).length + ' узлов, ' + (g.edges || []).length + ' связей'));
+  cap.append(el('span', 't', 'Окрестность графа · ' + (g.nodes || []).length + ' узлов, '
+    + (g.edges || []).length + ' связей'));
   const close = el('button', 'x');
   close.title = 'закрыть';
   close.setAttribute('aria-label', 'закрыть');

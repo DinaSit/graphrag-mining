@@ -1,8 +1,8 @@
 import { ask } from './ask.js';
+import { saveArticle } from './article_store.js';
 import { render, routeName } from './router.js';
 import { S, loadDocs } from './state.js';
-import { paintAnswer, paintChips, paintInfobox, recalcSpy, updateTocSpy } from './view_article.js';
-import { paintToc } from './web_mode.js';
+import { paintAnswer, paintSections, recalcSpy, updateTocSpy } from './view_article.js';
 
 // ==================================================================
 // Статья: состояние + SSE-стрим
@@ -64,6 +64,7 @@ export async function startStream(st){
     if (st.phase === 'streaming'){ // поток оборвался без final
       st.phase = 'error';
       st.error = 'поток оборвался до финального события';
+      saveArticle(st);
       syncArticle(st);
     }
   } catch (e) {
@@ -71,6 +72,7 @@ export async function startStream(st){
     if (st.phase === 'streaming' || st.phase === 'error'){
       st.phase = 'error';
       st.error = e && e.message ? e.message : 'сеть недоступна';
+      saveArticle(st);
       syncArticle(st);
     }
   }
@@ -98,6 +100,7 @@ export function handleSSE(st, block){
   } else if (ev === 'final'){
     st.final = payload;
     st.phase = payload.offtopic ? 'offtopic' : 'done';
+    saveArticle(st);
     syncArticle(st, 'final');
   }
 }
@@ -106,7 +109,8 @@ export function handleSSE(st, block){
 export function syncArticle(st, kind){
   if (routeName() !== 'article' || S.article !== st) return;
   if (st.phase === 'offtopic' || st.phase === 'error'){ render(); return; }
-  if (kind === 'evidence'){ paintToc(st); paintInfobox(st); paintChips(st); }
+  // paintSections сам дорисовывает оглавление, инфобокс и чипы
+  if (kind === 'evidence'){ paintSections(st); }
   else if (kind === 'delta'){ scheduleAnswerPaint(st); }
   else render(); // 'final'; вызовы без kind до сюда не доходят (offtopic/error выше)
 }
@@ -129,22 +133,14 @@ export function scheduleAnswerPaint(st){
 
 // ---------- активные данные ответа ----------
 export function respOf(st){ return st.final || st.evidence || {}; }
-// Граф прямого ответа — r.graph; у смежного ответа (sufficient=false, статус
-// partial) backend отдаёт материал в related_graph — его показываем С ПОДПИСЬЮ
-// «Граф смежных данных»: смежные данные не выдаются за прямые, но и не
-// скрываются. displayGraph отдаёт {graph, related} — related управляет
-// подписью мини-графа и заголовком оверлея.
+// Граф ответа. Backend делит материал по вердикту модели: прямой ответ идёт в
+// r.graph, смежный — в r.related_graph. Интерфейс это деление не показывает
+// (как и в таблице фактов), поэтому берётся тот, в котором есть узлы
 export function displayGraph(st){
   const r = respOf(st);
-  const main = r.graph;
-  if (main && Array.isArray(main.nodes) && main.nodes.length){
-    return { graph: main, related: false };
-  }
-  const rel = r.related_graph;
-  if (rel && Array.isArray(rel.nodes) && rel.nodes.length && r.evidence_status === 'partial'){
-    return { graph: rel, related: true };
-  }
-  return { graph: { nodes: [], edges: [] }, related: false };
+  for (const graph of [r.graph, r.related_graph])
+    if (graph && Array.isArray(graph.nodes) && graph.nodes.length) return graph;
+  return { nodes: [], edges: [] };
 }
 export function allSources(st){
   const r = respOf(st);

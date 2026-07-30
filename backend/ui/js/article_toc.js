@@ -2,7 +2,7 @@ import { ask } from './ask.js';
 import { el } from './dom.js';
 import { hideFnpop } from './footnote_popup.js';
 import { S } from './state.js';
-import { paintAnswer, paintAskError, paintChips, paintFinalSections, paintInfobox, paintOfftopic, scheduleSpy } from './view_article.js';
+import { paintAnswer, paintAskError, paintChips, paintInfobox, paintOfftopic, paintSections, scheduleSpy } from './view_article.js';
 import { applyWebMode, globeBtn, paintToc } from './web_mode.js';
 
 // ==================================================================
@@ -14,8 +14,7 @@ export const TOC_SECTIONS = [
   ['conf',  'Противоречия'],
   ['gaps',  'Пробелы'],
   ['hyp',   'Гипотезы'],
-  ['facts', 'Прямые факты и эксперименты'],
-  ['rel',   'Смежные данные'],
+  ['facts', 'Найденные факты'],
   ['notes', 'Источники'],
 ];
 
@@ -52,6 +51,15 @@ export function viewArticle(view){
   const ans = el('div'); ans.id = 'sec-ans';
   const ansBody = el('div'); ansBody.id = 'ans-body';
   ans.append(ansBody);
+  // Ненаписанный текст — полосы под курсором, в самом разделе ответа. Живут,
+  // пока идёт генерация; готовый ответ их снимает (paintSections)
+  if (st.phase !== 'done'){
+    const sk = el('div'); sk.id = 'skels';
+    const s1 = el('div', 'skel'); s1.style.width = '88%';
+    const s2 = el('div', 'skel'); s2.style.width = '64%';
+    sk.append(s1, s2);
+    ans.append(sk);
+  }
   art.append(ans);
   const rest = el('div'); rest.id = 'sec-rest';
   art.append(rest);
@@ -60,14 +68,9 @@ export function viewArticle(view){
   paintInfobox(st);
   paintChips(st);
   paintAnswer(st);
-  if (st.phase === 'done') paintFinalSections(st);
-  else {
-    const sk = el('div'); sk.id = 'skels';
-    const s1 = el('div', 'skel'); s1.style.width = '88%';
-    const s2 = el('div', 'skel'); s2.style.width = '64%';
-    sk.append(s1, s2);
-    art.append(sk);
-  }
+  // Секции рисуются с предпросмотра: факты и источники готовы за доли секунды,
+  // текст модель пишет десятки секунд
+  if (st.evidence || st.final) paintSections(st);
   // контейнер веб-режима размещён рядом с базовыми секциями и переключается глобусом
   const web = el('div'); web.id = 'webmode'; web.hidden = true;
   art.append(web);

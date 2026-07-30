@@ -1,4 +1,5 @@
 import { abortStream, newArticle, startStream } from './article_stream.js';
+import { saveArticle } from './article_store.js';
 import { apiJSON } from './dom.js';
 import { gotoRoute, routeName } from './router.js';
 import { S, pushRecent } from './state.js';
@@ -14,6 +15,7 @@ export function ask(q){
   pushRecent(q);
   abortStream(S.article); // старый стрим не должен дописывать поверх нового вопроса
   S.article = newArticle(q);
+  saveArticle(S.article); // перезагрузка во время ответа перезапустит именно этот вопрос
   startStream(S.article);
   startWebAnswer(S.article); // веб-контур стартует сразу, параллельно и независимо
   gotoRoute('article');
@@ -36,6 +38,7 @@ export async function startWebAnswer(st){
     if (e && e.name === 'AbortError') return; // штатная отмена при новом вопросе
     st.web = { phase: 'error', data: null, error: e.detail || e.message || 'сеть недоступна' };
   }
+  saveArticle(st);   // веб-ответ — часть состояния статьи
   // если пользователь уже смотрит веб-режим этой статьи — скелет заменяем ответом,
   // а инфобокс и чипы получают свежий список веб-источников
   if (routeName() === 'article' && S.article === st && st.webMode){

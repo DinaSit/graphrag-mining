@@ -2,6 +2,7 @@ import { $, apiJSON, clear, el, trunc } from './dom.js';
 import { render, routeName } from './router.js';
 import { S, loadDocs } from './state.js';
 import { pollReviewCount } from './view_review.js';
+import { allowKnowledgeChange } from './llm_guard.js';
 
 // ==================================================================
 // Загрузка документов (плашка в шапке)
@@ -10,15 +11,21 @@ export const uplEl = $('#upl');
 export const fileInput = $('#file-input');
 uplEl.addEventListener('click', e => {
   if (e.target.closest('#upl-pop')) return;
+  if (!allowKnowledgeChange()) return;
   fileInput.click();
 });
-uplEl.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' '){ e.preventDefault(); fileInput.click(); } });
+uplEl.addEventListener('keydown', e => {
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  e.preventDefault();
+  if (allowKnowledgeChange()) fileInput.click();
+});
 fileInput.addEventListener('change', () => { onFiles(fileInput.files); fileInput.value = ''; });
 uplEl.addEventListener('dragover', e => { e.preventDefault(); uplEl.classList.add('dragging'); });
 uplEl.addEventListener('dragleave', () => uplEl.classList.remove('dragging'));
 uplEl.addEventListener('drop', e => {
   e.preventDefault();
   uplEl.classList.remove('dragging');
+  if (!allowKnowledgeChange()) return;
   if (e.dataTransfer && e.dataTransfer.files) onFiles(e.dataTransfer.files);
 });
 

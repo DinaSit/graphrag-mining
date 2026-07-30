@@ -1,4 +1,4 @@
-  /* Токены продукта (V1) — из утверждённого макета */
+  /* Токены оформления: единственный источник цветов, отступов и сетки */
   :root{
     --w-bg:#101418; --w-panel:#141a20; --w-panel2:#0c0f12; --w-line:#232a31; --w-line2:#2b333b;
     --w-ink:#e7eaee; --w-body:#cfd6dd; --w-mut:#93a0ad; --w-dim:#5b6672;
@@ -231,7 +231,9 @@
   .trow h1.art{border-bottom:0;padding-bottom:0;flex:1;min-width:0}
   /* воздух между линией под заголовком и началом ответа — одинаковый для ответа
      по базе, ответа по вебу и скелета загрузки, чтобы текст не прыгал */
-  #sec-ans,#webmode,#skels{margin-top:22px}
+  #sec-ans,#webmode{margin-top:22px}
+  /* полосы ненаписанного текста идут сразу под курсором внутри раздела ответа */
+  #skels{margin-top:6px}
   /* глобус в стиле лупы: приглушённый stroke, голубой цвет при наведении; активное состояние подсвечено */
   .gicon{display:inline-flex;color:var(--w-dim);cursor:pointer;padding:5px;margin-top:3px;border-radius:7px;flex:none}
   .gicon:hover{color:var(--w-link)}
@@ -278,6 +280,8 @@
     position:sticky;top:0;z-index:1;background:var(--w-bg);
     box-shadow:inset 0 -1px 0 var(--w-line2)}
   .exp td{padding:7px 10px;border-bottom:1px solid var(--w-line);color:var(--w-body)}
+  /* числовые колонки не переносятся: «99,9977 %» разорванное по строкам не читается */
+  .exp td.num{white-space:nowrap}
   .exp td.up{color:var(--w-ok);font-weight:600}
   .exp td.down{color:#e5734f;font-weight:600}
   ol.refs{font-size:14px;color:var(--w-mut);padding-left:22px;margin:0}
@@ -399,6 +403,13 @@
   .goverlay .cap .x:hover{color:var(--w-ink);background:#1b222a}
   .goverlay .cap .x svg{display:block}
 
+  /* окно отказа при резервной модели: узкая панель поверх общего .goverlay */
+  .goverlay .panel.narrow{width:min(460px,92vw)}
+  .goverlay .blocktext{margin:6px 0 18px;color:var(--w-body);line-height:1.55;font-size:14px}
+  .goverlay .blockok{background:transparent;border:1px solid var(--w-line2);border-radius:16px;
+    color:var(--w-body);font-size:13px;padding:6px 18px;cursor:pointer}
+  .goverlay .blockok:hover{border-color:var(--w-link)}
+
   /* ---------- просмотр источников ---------- */
   /* под шапкой — два столбца, каждый скроллится независимо: прокрутка длинного документа не смещает список */
   .viewer{display:grid;grid-template-columns:330px minmax(0,1fr);height:calc(100vh - var(--hdr-h))}
@@ -475,21 +486,25 @@
      «тип публикации» (мультивыбор) и «по новизне» */
   .docs .dctrl{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:0 0 12px}
   .docs .dright{margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
-  .docs .dlbl{font-size:12.5px;color:var(--w-dim)}
+  .dlbl{font-size:12.5px;color:var(--w-dim)}
   /* единый вид всех контролов панели: одна обводка, радиус, высота; нативный
      селект лишается системной отрисовки, стрелка — собственная, как у выпадающего списка типов.
      Ширина фиксирована (box-sizing:border-box), поэтому при смене значения контрол не
      растягивается: не поместившийся текст обрезается многоточием (text-overflow) */
-  .docs .dsel{background:transparent;border:1px solid var(--w-line2);border-radius:16px;
+  .dsel{background:transparent;border:1px solid var(--w-line2);border-radius:16px;
     color:var(--w-mut);font-size:12.5px;padding:4px 26px 4px 12px;cursor:pointer;
     appearance:none;-webkit-appearance:none;box-sizing:border-box;width:120px;height:30px;
     overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
     background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2393a0ad' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
     background-repeat:no-repeat;background-position:right 9px center;background-size:11px}
-  .docs .dsel:hover{border-color:var(--w-link);color:var(--w-body)}
-  /* вместо системного фокус-кольца (синее свечение Safari) — своя рамка */
-  .docs .dsel:focus{outline:none;border-color:var(--w-link);color:var(--w-body)}
-  .docs .dsel option{background:var(--w-bg);color:var(--w-body)}
+  .dsel:hover{border-color:var(--w-link);color:var(--w-body)}
+  /* Вид контрола зависит только от наведения. К фокусу его привязывать нельзя
+     ни через :focus, ни через :focus-visible: Safari и Firefox засчитывают обе
+     эти псевдоклассы для select и при клике мышью, поэтому любая привязка к
+     фокусу залипает после выбора значения. Системная обводка снимается там же */
+  .dsel:focus,
+  .dsel:focus-visible{outline:none}
+  .dsel option{background:var(--w-bg);color:var(--w-body)}
   .docs .dchk{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:var(--w-mut);
     cursor:pointer;border:1px solid var(--w-line2);border-radius:16px;padding:4px 10px}
   .docs .dchk:hover{border-color:var(--w-link)}
@@ -511,7 +526,7 @@
   .docs .ddpop label:hover{background:rgba(127,168,232,.08)}
   .docs .ddpop input{accent-color:var(--w-link);margin:0}
   .docs .ddempty{font-size:12.5px;color:var(--w-dim);padding:5px 9px;white-space:nowrap}
-  /* досье постоянное: ~40% ширины раздела (как в макете), прокручивается независимо.
+  /* досье постоянное: ~40% ширины раздела, прокручивается независимо.
      margin-top компенсирует верхний отступ раздела — разделительная линия идёт
      от самого верха раздела до низа, без зазора */
   .ddock{flex:0 0 clamp(380px, 40%, 660px);min-width:0;overflow-y:auto;
@@ -528,6 +543,7 @@
   .ddock .pv.eh{display:flex;align-items:center;justify-content:center;color:var(--w-dim);font-size:13px}
   .ddock .lbl{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--w-dim);margin:12px 0 4px}
   .ddock .why{font-size:13.5px;color:var(--w-body);border-left:2px solid var(--w-link);padding-left:10px}
+  .ddock .dkauthors{font-size:13.5px;color:var(--w-body);line-height:1.5}
   .ddock .stats{font-size:13.5px;color:var(--w-mut)}
   /* счётчики графа — справочные, без подчёркивания и переходов */
   .ddock .stats .stnum{color:var(--w-body)}
@@ -567,50 +583,69 @@
   .oops .retry:hover{border-color:var(--w-link)}
 
   /* ---------- review ---------- */
-  .review{padding:0 26px 40px;max-width:860px;margin:0 auto}
   /* на широких экранах — та же вертикаль, что окно поиска шапки; правый отступ = левому */
   @media (min-width:981px){.review{max-width:none;margin:0;padding-left:var(--content-x);padding-right:var(--content-x)}}
   /* шапка раздела (заголовок + фильтры + массовые действия) закрепляется (sticky) под шапкой сайта */
   .rhead{position:sticky;top:var(--hdr-h);z-index:6;background:var(--w-bg);
     border-bottom:1px solid var(--w-line);padding:20px 0 2px;margin-bottom:14px}
-  .review h3{font-family:Georgia,serif;font-size:20px;font-weight:400;margin:0 0 14px}
-  .rtools{display:flex;align-items:center;gap:10px 16px;flex-wrap:wrap;margin:0 0 10px;font-size:13.5px;color:var(--w-mut)}
-  .rtools label{display:flex;align-items:center;gap:6px;white-space:nowrap}
-  .rtools select,.rtools input[type=number]{background:#171c21;border:1px solid var(--w-line2);border-radius:7px;
-    color:var(--w-ink);font-size:13.5px;padding:5px 8px;max-width:280px}
-  .rtools input[type=number]{width:70px}
-  .rbulk{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:0 0 12px;font-size:13.5px;color:var(--w-mut)}
-  .rbulk .selall{display:flex;align-items:center;gap:7px;cursor:pointer;white-space:nowrap}
-  .rbulk .cnt{color:var(--w-ink);font-variant-numeric:tabular-nums}
-  .rbulk .grp{margin-left:auto;display:flex;gap:12px} /* кнопки — к правому краю строки */
-  .rbulk button{border:1px solid var(--w-line2);border-radius:7px;padding:5px 14px;font-size:13.5px;background:#171c21}
-  .rbulk button:disabled{opacity:.45;cursor:default}
-  .rbulk .ok{color:var(--w-ok);border-color:#2c4636}
-  .rbulk .ok:not(:disabled):hover{border-color:var(--w-ok)}
-  .rbulk .no{color:#c98a84;border-color:#4a2f2c}
-  .rbulk .no:not(:disabled):hover{border-color:var(--w-red)}
-  .review input[type=checkbox]{accent-color:var(--w-link);width:15px;height:15px;margin:0;cursor:pointer}
-  .rsummary{border:1px solid var(--w-line2);border-left:3px solid var(--w-link);background:var(--w-panel);
-    border-radius:0 9px 9px 0;padding:10px 14px;font-size:13.5px;color:var(--w-body);margin:0 0 12px}
-  .rsummary ul{margin:7px 0 0;padding-left:18px;color:#c98a84}
-  .rsummary li{margin-bottom:3px;overflow-wrap:anywhere}
-  .rmore{display:block;margin:4px auto 0;border:1px solid var(--w-line2);border-radius:8px;padding:7px 20px;
-    font-size:14px;background:#171c21;color:var(--w-link)}
-  .rmore:hover{border-color:var(--w-link)}
-  .rcard{background:var(--w-panel);border:1px solid var(--w-line2);border-radius:11px;padding:15px 18px;margin-bottom:14px;
-    display:flex;gap:12px;align-items:flex-start}
-  .rcard .rc-chk{margin-top:3px;flex:none}
-  .rcard .rc-body{flex:1;min-width:0}
-  .rcard .rq{font-style:italic;color:var(--w-mut);font-size:14.5px;line-height:1.6;margin-bottom:9px;overflow-wrap:anywhere}
-  .rcard .rx{font-size:14.5px;color:var(--w-body);margin-bottom:5px;overflow-wrap:anywhere}
-  .rcard .rx b{color:var(--w-ink);font-weight:600}
-  .rcard .rmeta{font-size:13px;color:var(--w-dim);margin-bottom:5px;overflow-wrap:anywhere}
-  .rcard .rwarn{font-size:13.5px;color:var(--w-link);margin:5px 0;padding-left:14px;position:relative}
-  .rcard .rwarn::before{content:"⚠";position:absolute;left:0;font-size:12px}
-  .rcard .racts{display:flex;gap:12px;margin-top:10px}
-  .rcard .racts button{border:1px solid var(--w-line2);border-radius:7px;padding:5px 16px;font-size:13.5px;background:#171c21}
-  .rcard .racts .ok{color:var(--w-ok);border-color:#2c4636}
-  .rcard .racts .ok:hover{border-color:var(--w-ok)}
-  .rcard .racts .no{color:#c98a84;border-color:#4a2f2c}
-  .rcard .racts .no:hover{border-color:var(--w-red)}
-  .rempty{color:var(--w-mut);font-size:16px;padding:40px 0;text-align:center}
+  /* ---------- Review: конвейер ----------
+     Один кандидат на экран: слева документ на странице цитаты, справа поля.
+     Списка нет — решение сразу переводит к следующему */
+  .belt-top{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;
+    padding:12px var(--page-pad);border-bottom:1px solid var(--w-line);background:var(--w-panel2)}
+  .belt-title{font-family:Georgia,serif;font-size:19px;font-weight:400;margin:0;color:var(--w-ink);
+    max-width:38%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .belt-tools{margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+
+  .belt{display:grid;grid-template-columns:1fr minmax(380px,470px)}
+  .belt-doc{padding:16px 22px 16px var(--page-pad);min-width:0;display:flex}
+  .belt-view{flex:1;min-width:0;background:var(--w-panel);border:1px solid var(--w-line);
+    border-radius:9px;overflow:hidden}
+  .belt-view iframe{width:100%;height:100%;border:0}
+  /* когда вместо документа показана причина, она — единственное содержимое
+     окна файла: ставим её по центру рамки, а не в верхний левый угол */
+  .belt-view > .vempty{height:100%;display:flex;align-items:center;justify-content:center;
+    padding:0 20px;text-align:center}
+  .belt-work{display:flex;flex-direction:column;gap:15px;min-width:0;overflow-y:auto;
+    padding:16px var(--page-pad) 16px 22px;border-left:1px solid var(--w-line)}
+  /* высота экрана = окно минус шапка минус строка заголовка: страница целиком
+     не прокручивается, своя прокрутка есть только у колонки полей */
+  @media (min-width:981px){
+    .belt-scr{height:calc(100vh - var(--hdr-h));display:flex;flex-direction:column;overflow:hidden}
+    .belt{flex:1;min-height:0}
+  }
+  @media (max-width:980px){
+    .belt{display:block}
+    .belt-doc,.belt-work{padding:14px var(--page-pad);border-left:0}
+    .belt-view{height:340px}
+  }
+
+  .belt-quote{font-style:italic;color:var(--w-mut);font-size:14.5px;line-height:1.55;
+    border-left:2px solid var(--w-warn);padding-left:12px}
+  .belt-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:11px}
+  .belt-f{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--w-mut)}
+  .belt-f input,.belt-f select{background:#171c21;border:1px solid var(--w-line2);border-radius:6px;
+    padding:6px 9px;font-size:14px;color:var(--w-ink);height:33px;line-height:normal}
+  .belt-f input:focus,.belt-f select:focus{outline:none;border-color:var(--w-link)}
+  /* поле с замечанием: рамка и подпись причины прямо под ним */
+  .belt-f.bad input,.belt-f.bad select{border-color:var(--w-warn)}
+  .belt-f.bad .k{color:var(--w-warn)}
+  .belt-f .hint{font-size:11.5px;color:var(--w-warn);line-height:1.35}
+
+  /* Три равные кнопки одним блоком: интерфейс не подсказывает, какое решение
+     «правильное» — эксперт решает, а не соглашается */
+  .belt-acts{margin-top:auto;padding-top:16px;border-top:1px solid var(--w-line)}
+  .belt-seg{display:grid;grid-template-columns:1fr 1fr 1fr;border:1px solid var(--w-line2);
+    border-radius:10px;overflow:hidden}
+  .belt-seg button{padding:14px 8px;font-size:14px;background:var(--w-panel);border:0;cursor:pointer;
+    color:var(--w-body);border-right:1px solid var(--w-line2)}
+  .belt-seg button:last-child{border-right:0}
+  .belt-seg button:hover:not(:disabled){background:#1a222b}
+  .belt-seg button:disabled{opacity:.5;cursor:default}
+  .belt-seg .ok{color:var(--w-ok)}
+  .belt-seg .no{color:#c98a84}
+  .belt-seg .sk{color:var(--w-mut)}
+  .belt-count{font-size:12.5px;color:var(--w-dim);text-align:center;margin:10px 0 6px}
+  .belt-bar{height:3px;background:var(--w-line);border-radius:2px;overflow:hidden}
+  .belt-bar i{display:block;height:100%;background:var(--w-link);transition:width .2s}
+  .belt-empty{color:var(--w-dim);font-size:14px;padding:30px 0;text-align:center}

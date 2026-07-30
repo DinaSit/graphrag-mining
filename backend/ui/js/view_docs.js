@@ -1,6 +1,7 @@
 import { apiJSON, clear, el } from './dom.js';
 import { gotoRoute, render, routeName } from './router.js';
 import { docFragCache, loadDocs, sciLabel } from './state.js';
+import { allowKnowledgeChange } from './llm_guard.js';
 import { plural } from './view_home.js';
 import { docPreviewSrc, openDocView } from './view_sources.js';
 
@@ -270,6 +271,13 @@ export function openDock(d, lst, dock){
   pv.append(go);
   dk.append(pv);
 
+  // Авторы с титульного листа: носители компетенции по документу. Признак
+  // справочный, как год; не нашлись — строки нет
+  if ((d.authors || []).length){
+    dk.append(el('div', 'lbl', 'авторы'));
+    dk.append(el('div', 'dkauthors', d.authors.join(', ')));
+  }
+
   // Строка «в графе знаний»: слева счётчики (справочные, без переходов),
   // справа действия над документом — один ряд над обоснованием признака
   dk.append(el('div', 'lbl', 'в графе знаний'));
@@ -314,6 +322,7 @@ export function openDock(d, lst, dock){
   const rf = dockBtn(null, 'Перезагрузить документ в систему', _SVG_REFRESH);
   rf.addEventListener('click', async () => {
     if (d.status === 'processing') return; // уже идёт
+    if (!allowKnowledgeChange()) return;
     try {
       await apiJSON('/documents/' + encodeURIComponent(d.id) + '/reprocess', { method: 'POST' });
       await rerender(); // строка и досье покажут «обрабатывается…»
@@ -325,6 +334,7 @@ export function openDock(d, lst, dock){
 
   const del = dockBtn('trash', 'Удалить', _SVG_TRASH);
   del.addEventListener('click', async () => {
+    if (!allowKnowledgeChange()) return;
     if (!confirm('Удалить «' + (d.filename || d.id) + '» и всё извлечённое из него? Это необратимо.')) return;
     try {
       await apiJSON('/documents/' + encodeURIComponent(d.id), { method: 'DELETE' });

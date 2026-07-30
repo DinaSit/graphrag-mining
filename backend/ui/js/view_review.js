@@ -1,326 +1,278 @@
 import { $, apiJSON, clear, el, trunc, wrapQuote } from './dom.js';
-import { docName, docsCache, fragLoc, loadDocs } from './state.js';
-import { plural } from './view_home.js';
+import { docName, docsCache, loadDocs } from './state.js';
+import { paintSourceDoc } from './view_sources.js';
 
 // ==================================================================
-// Экран Review: фильтры, сортировка, массовые действия, порции по 50
+// Экран Review: конвейер — один кандидат на весь экран
 // ==================================================================
-export const REVIEW_PAGE = 50;
+// Списка нет: кандидаты идут потоком, слева документ на странице цитаты,
+// справа поля факта. Решение по кандидату сразу переводит к следующему.
+
+// Поля кандидата, доступные эксперту. Список повторяет EDITABLE_FIELDS
+// на стороне backend; цитаты и источника здесь нет намеренно — правка цитаты
+// обесценила бы проверку «цитата есть в документе»
+const FIELDS = [
+  ['material', 'материал', 'text'],
+  ['property', 'свойство', 'text'],
+  ['process', 'процесс', 'text'],
+  ['equipment', 'оборудование', 'text'],
+  ['effect_direction', 'направление эффекта', 'direction'],
+  ['effect_value', 'величина эффекта', 'number'],
+  ['effect_unit', 'единица эффекта', 'text'],
+  ['temperature_c', 'температура, °C', 'number'],
+  ['duration_h', 'длительность, ч', 'number'],
+  ['result_value', 'результат', 'number'],
+  ['result_unit', 'единица результата', 'text'],
+  ['sample', 'образец', 'text'],
+  ['lab', 'лаборатория', 'text'],
+  ['team', 'команда', 'text'],
+];
+
+const ISSUE_LABELS = {
+  field_missing: 'не извлечено поле',
+  quote_unconfirmed: 'цитата не подтверждена',
+  number_unconfirmed: 'число не подтверждено',
+  number_implausible: 'число неправдоподобно',
+  unit_mismatch: 'единица не приводится',
+  source_missing: 'нет источника',
+};
+
+const issuesOf = c => ((c.payload || {}).review_issues) || [];
 
 export function viewReview(view){
-  const wrap = el('div', 'review');
-  const rhead = el('div', 'rhead'); // липкая шапка раздела: заголовок + фильтры + массовые действия
-  const h = el('h3', null, 'Проверка извлечённых фактов');
-  const tools = el('div', 'rtools'); tools.hidden = true;
-  const bulk = el('div', 'rbulk'); bulk.hidden = true;
-  const summary = el('div', 'rsummary'); summary.hidden = true;
-  const list = el('div');
-  const moreWrap = el('div');
-  rhead.append(h, tools, bulk);
-  wrap.append(rhead, summary, list, moreWrap);
+  const wrap = el('div', 'belt-scr');
+  const top = el('div', 'belt-top');
+  const stage = el('div', 'belt');
+  const docside = el('div', 'belt-doc');
+  const work = el('div', 'belt-work');
+  stage.append(docside, work);
+  wrap.append(top, stage);
   view.append(wrap);
-  list.append(el('div', 'rempty', 'Загрузка…'));
 
-  const RV = { items: [], selected: new Set(), sortDir: 'desc', docId: '', minConf: 0, shown: REVIEW_PAGE, busy: false };
-  let selAllCb, cntEl, okAllBtn, noAllBtn;
+  const RV = { items: [], index: 0, docId: '', issue: '', busy: false, done: 0 };
+  let inputs = new Map();
 
-  // фильтры и сортировка — по ВСЕМУ загруженному набору
-  function filtered(){
+  // индекс отсчитывается по ОТФИЛЬТРОВАННОМУ списку: иначе выбор фильтра
+  // меняет счётчик, но оставляет на экране кандидата из общей очереди
+  const current = () => filteredItems()[RV.index] || null;
+
+  function filteredItems(){
     let arr = RV.items;
     if (RV.docId) arr = arr.filter(c => c.source && c.source.document_id === RV.docId);
-    if (RV.minConf > 0) arr = arr.filter(c => (Number(c.confidence) || 0) * 100 >= RV.minConf);
-    return arr.slice().sort((a, b) => {
-      const d = (Number(a.confidence) || 0) - (Number(b.confidence) || 0);
-      return RV.sortDir === 'asc' ? d : -d;
-    });
+    if (RV.issue) arr = arr.filter(c => issuesOf(c).some(i => i.code === RV.issue));
+    return arr;
   }
 
-  function buildTools(){
-    clear(tools);
-    const lbl = (text, ctrl) => { const l = el('label'); l.append(text + ' ', ctrl); return l; };
+  // ---------- верхняя строка: имя документа заголовком + фильтры ----------
 
-    const sort = document.createElement('select');
-    for (const [v, t] of [['desc', 'по убыванию'], ['asc', 'по возрастанию']]){
-      const o = el('option', null, t); o.value = v; sort.append(o);
-    }
-    sort.value = RV.sortDir;
-    sort.addEventListener('change', () => { RV.sortDir = sort.value; RV.shown = REVIEW_PAGE; repaint(); });
-    tools.append(lbl('уверенность:', sort));
+  function paintTop(){
+    clear(top);
+    const c = current();
+    const full = c && c.source ? docName(c.source.document_id) : 'Проверка извлечённых фактов';
+    const title = el('h3', 'belt-title', full);
+    title.title = full;   // полное имя — подсказкой при наведении
+    top.append(title);
+
+    // Фильтры оформлены как в разделе «Документы» (эталон): подпись отдельным
+    // приглушённым текстом, контрол — капсулой с собственной стрелкой
+    const tools = el('div', 'belt-tools');
+    const lbl = (text, ctrl) => { tools.append(el('span', 'dlbl', text)); tools.append(ctrl); };
 
     const docSel = document.createElement('select');
-    const all = el('option', null, 'все документы'); all.value = '';
-    docSel.append(all);
+    docSel.className = 'dsel';
+    const allDocs = el('option', null, 'все документы'); allDocs.value = '';
+    docSel.append(allDocs);
     for (const d of (docsCache || [])){
-      const o = el('option', null, trunc(d.filename || d.id, 48)); o.value = d.id; docSel.append(o);
+      const o = el('option', null, trunc(d.filename || d.id, 44)); o.value = d.id; docSel.append(o);
     }
-    docSel.value = RV.docId; // пресет из досье отражается в селекте
-    docSel.addEventListener('change', () => { RV.docId = docSel.value; RV.shown = REVIEW_PAGE; repaint(); });
-    tools.append(lbl('документ:', docSel));
+    docSel.value = RV.docId;
+    docSel.addEventListener('change', () => { RV.docId = docSel.value; RV.index = 0; paintAll(); });
+    lbl('документ:', docSel);
 
-    const conf = document.createElement('input');
-    conf.type = 'number'; conf.min = '0'; conf.max = '100'; conf.step = '5'; conf.placeholder = '0';
-    conf.addEventListener('input', () => {
-      RV.minConf = Math.max(0, Math.min(100, Number(conf.value) || 0));
-      RV.shown = REVIEW_PAGE;
-      repaint();
-    });
-    tools.append(lbl('уверенность от, %:', conf));
+    const counts = {};
+    for (const c2 of RV.items) for (const i of issuesOf(c2)) counts[i.code] = (counts[i.code] || 0) + 1;
+    const issueSel = document.createElement('select');
+    issueSel.className = 'dsel';
+    const anyIssue = el('option', null, 'любое замечание'); anyIssue.value = '';
+    issueSel.append(anyIssue);
+    for (const [code, label] of Object.entries(ISSUE_LABELS)){
+      if (!counts[code]) continue;
+      const o = el('option', null, label + ' · ' + counts[code]); o.value = code; issueSel.append(o);
+    }
+    issueSel.value = RV.issue;
+    issueSel.addEventListener('change', () => { RV.issue = issueSel.value; RV.index = 0; paintAll(); });
+    lbl('замечание:', issueSel);
+    top.append(tools);
   }
 
-  function buildBulk(){
-    clear(bulk);
-    const selall = el('label', 'selall');
-    selAllCb = document.createElement('input');
-    selAllCb.type = 'checkbox';
-    selAllCb.addEventListener('change', () => {
-      if (selAllCb.checked) for (const c of filtered()) RV.selected.add(c.id);
-      else RV.selected.clear();
-      repaint();
-    });
-    selall.append(selAllCb, document.createTextNode('Выделить все'));
-    cntEl = el('span', 'cnt', '');
-    okAllBtn = el('button', 'ok', 'Подтвердить');
-    noAllBtn = el('button', 'no', 'Отклонить');
-    okAllBtn.setAttribute('aria-label', 'Подтвердить выбранные');
-    noAllBtn.setAttribute('aria-label', 'Отклонить выбранные');
-    okAllBtn.addEventListener('click', () => bulkAct('approve'));
-    noAllBtn.addEventListener('click', () => bulkAct('reject'));
-    const grp = el('div', 'grp');
-    grp.append(okAllBtn, noAllBtn);
-    bulk.append(selall, cntEl, grp);
+  // ---------- документ ----------
+
+  function paintDoc(){
+    clear(docside);
+    const c = current();
+    const box = el('div', 'belt-view');
+    box.id = 'vdoc';                 // paintSourceDoc рисует просмотрщик сюда
+    docside.append(box);
+    // Нет кандидата (очередь пуста или фильтры ничего не отобрали) — левая
+    // колонка остаётся пустой: причину называет правая, вторая надпись об этом
+    // же только дублирует её. «Источник недоступен» относится к самому
+    // кандидату и осмысленно, лишь когда кандидат есть, а ссылки у него нет
+    if (c && c.source) paintSourceDoc(c.source);
+    else if (c) box.append(el('div', 'vempty', 'Источник недоступен'));
   }
 
-  function updateBulkState(){
-    if (!selAllCb) return;
-    const f = filtered();
-    const n = RV.selected.size;
-    cntEl.textContent = 'выбрано: ' + n;
-    selAllCb.checked = f.length > 0 && n === f.length;
-    selAllCb.indeterminate = n > 0 && n < f.length;
-    selAllCb.disabled = RV.busy || !f.length;
-    okAllBtn.disabled = noAllBtn.disabled = RV.busy || !n;
+  // ---------- поля факта ----------
+
+  function paintWork(){
+    clear(work);
+    inputs = new Map();
+    const list = filteredItems();
+    const c = current();
+    if (!c){
+      work.append(el('div', 'belt-empty',
+        RV.items.length ? 'Под текущие фильтры ничего не попадает' : 'Всё проверено ✓'));
+      return;
+    }
+
+    if (c.source && c.source.quote) work.append(el('div', 'belt-quote', wrapQuote(c.source.quote)));
+
+    // поле с замечанием только помечено жёлтым: формулировка ушла в подсказку,
+    // иначе строки причин растягивают форму вниз и она перестаёт помещаться
+    const byField = {};
+    for (const i of issuesOf(c)) (byField[i.field] = byField[i.field] || []).push(i);
+
+    const form = el('div', 'belt-form');
+    for (const [key, label, kind] of FIELDS){
+      const bad = !!byField[key];
+      const row = el('label', 'belt-f' + (bad ? ' bad' : ''));
+      row.append(el('span', 'k', label));
+      let input;
+      if (kind === 'direction'){
+        input = document.createElement('select');
+        for (const [v, t] of [['', '—'], ['increase', 'рост'], ['decrease', 'снижение'], ['neutral', 'без изменений']]){
+          const o = el('option', null, t); o.value = v; input.append(o);
+        }
+        input.value = c.payload[key] || '';
+      } else {
+        input = document.createElement('input');
+        input.type = kind === 'number' ? 'number' : 'text';
+        if (kind === 'number') input.step = 'any';
+        input.value = c.payload[key] == null ? '' : String(c.payload[key]);
+      }
+      input.disabled = RV.busy;
+      if (bad) row.title = byField[key].map(i => i.label).join('; ');
+      inputs.set(key, [input, kind]);
+      row.append(input);
+      form.append(row);
+    }
+    work.append(form);
+
+    // Вариант Б: три равные кнопки одним блоком — интерфейс не подсказывает,
+    // какое решение «правильное»; под ними позиция в очереди и полоса прогресса
+    const acts = el('div', 'belt-acts');
+    const seg = el('div', 'belt-seg');
+    const mk = (cls, text, fn) => {
+      const b = el('button', cls, text);
+      b.disabled = RV.busy;
+      b.addEventListener('click', fn);
+      seg.append(b);
+      return b;
+    };
+    mk('ok', 'Подтвердить', () => decide('approve'));
+    mk('no', 'Отклонить', () => decide('reject'));
+    mk('sk', 'Пропустить', () => { RV.index += 1; paintAll(); });
+    acts.append(seg);
+
+    const pos = Math.min(RV.index + 1, list.length);
+    acts.append(el('div', 'belt-count', pos + ' из ' + list.length));
+    const bar = el('div', 'belt-bar');
+    const fill = el('i');
+    fill.style.width = (list.length ? (pos / list.length) * 100 : 0) + '%';
+    bar.append(fill);
+    acts.append(bar);
+    work.append(acts);
   }
 
-  // на время любой операции (bulk или одиночной) блокируем ВСЕ управляющие элементы,
-  // чтобы кандидата нельзя было обработать дважды параллельно
+  function paintAll(){
+    const list = filteredItems();
+    if (RV.index >= list.length) RV.index = Math.max(0, list.length - 1);
+    paintTop();
+    paintDoc();
+    paintWork();
+  }
+
   function setBusy(b){
     RV.busy = b;
-    updateBulkState();
-    for (const ctl of list.querySelectorAll('.racts button, .rc-chk')) ctl.disabled = b;
+    for (const ctl of work.querySelectorAll('button, input, select')) ctl.disabled = b;
   }
 
-  function repaint(){
-    h.textContent = 'Проверка извлечённых фактов · ' + RV.items.length;
-    tools.hidden = bulk.hidden = !RV.items.length;
-    const f = filtered();
-    // выделение всегда подмножество отфильтрованного набора
-    const fIds = new Set(f.map(c => c.id));
-    for (const id of Array.from(RV.selected)) if (!fIds.has(id)) RV.selected.delete(id);
-    clear(list);
-    clear(moreWrap);
-    if (!RV.items.length){
-      list.append(el('div', 'rempty', 'Всё проверено ✓'));
-    } else if (!f.length){
-      list.append(el('div', 'rempty', 'Под текущие фильтры ничего не попадает'));
-    } else {
-      for (const c of f.slice(0, RV.shown)) list.append(reviewCard(c));
-      if (f.length > RV.shown){
-        const more = el('button', 'rmore',
-          'Показать ещё ' + Math.min(REVIEW_PAGE, f.length - RV.shown) + ' (скрыто ' + (f.length - RV.shown) + ')');
-        more.addEventListener('click', () => { RV.shown += REVIEW_PAGE; repaint(); });
-        moreWrap.append(more);
-      }
+  // Правки полей уходят вместе с решением: отдельной кнопки «сохранить» нет,
+  // подтверждение означает «поля верны в том виде, в каком они на экране»
+  function editedFields(c){
+    const fields = {};
+    let changed = false;
+    for (const [key, [input, kind]] of inputs){
+      const raw = input.value.trim();
+      const value = kind === 'number' ? (raw === '' ? null : Number(raw)) : raw;
+      const was = c.payload[key] == null ? (kind === 'number' ? null : '') : c.payload[key];
+      if (String(value ?? '') !== String(was ?? '')) changed = true;
+      fields[key] = value;
     }
-    updateBulkState();
+    return changed ? fields : null;
   }
 
-  function removeItems(ids){
-    const gone = ids instanceof Set ? ids : new Set(ids);
-    RV.items = RV.items.filter(c => !gone.has(c.id));
-    for (const id of gone) RV.selected.delete(id);
-  }
-
-  function showProgress(text){
-    summary.hidden = false;
-    clear(summary);
-    summary.append(document.createTextNode(text));
-  }
-
-  function showResult(action, okCount, failed){
-    summary.hidden = false;
-    clear(summary);
-    summary.append(el('div', null,
-      (action === 'approve' ? 'Подтверждено ' : 'Отклонено ') + okCount
-      + (failed.length ? ', ошибок ' + failed.length : '')));
-    if (failed.length){
-      const ul = el('ul');
-      for (const f of failed) ul.append(el('li', null, (f && f.id ? f.id + ': ' : '') + ((f && f.error) || 'ошибка')));
-      summary.append(ul);
-    }
-  }
-
-  // Одиночные вердикты по кандидату — общие для кнопок карточки и поштучной
-  // деградации bulk; note передаётся телом запроса только непустым
-  const approveOne = id =>
-    apiJSON('/review/facts/' + encodeURIComponent(id) + '/approve', { method: 'POST' });
-  const rejectOne = (id, note) => {
-    const opts = { method: 'POST' };
-    if (note){
-      opts.headers = { 'Content-Type': 'application/json' };
-      opts.body = JSON.stringify({ note: note });
-    }
-    return apiJSON('/review/facts/' + encodeURIComponent(id) + '/reject', opts);
-  };
-
-  async function bulkAct(action){
-    const ids = Array.from(RV.selected);
-    if (!ids.length || RV.busy) return;
-    let note = null;
-    if (action === 'reject'){
-      const v = prompt('Причина отклонения для всех выбранных (необязательно):', '');
-      if (v === null) return;
-      note = v.trim() || null;
-    }
+  async function decide(action){
+    const c = current();
+    if (!c || RV.busy) return;
     setBusy(true);
-    showProgress('Обработка: ' + ids.length + ' ' + plural(ids.length, 'кандидат', 'кандидата', 'кандидатов') + '…');
-    let processed = [], failed = [];
     try {
-      const data = await apiJSON('/review/facts/bulk', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ candidate_ids: ids, action: action, note: note }),
-      });
-      failed = Array.isArray(data.failed) ? data.failed : [];
-      const bad = new Set(failed.map(x => x && x.id));
-      processed = ids.filter(id => !bad.has(id));
-    } catch (e) {
-      if (e.status !== 404){
-        setBusy(false);
-        showResult(action, 0, [{ id: null, error: e.detail || e.message || 'ошибка сети' }]);
-        repaint();
-        return;
-      }
-      // старый backend без bulk-эндпоинта — деградация: поштучно с прогрессом
-      for (let i = 0; i < ids.length; i++){
-        showProgress('Обработка ' + (i + 1) + ' / ' + ids.length + '…');
-        try {
-          if (action === 'approve') await approveOne(ids[i]);
-          else await rejectOne(ids[i], note);
-          processed.push(ids[i]);
-        } catch (err) {
-          failed.push({ id: ids[i], error: err.detail || err.message || 'ошибка' });
+      if (action === 'approve'){
+        const fields = editedFields(c);
+        let state = c;
+        if (fields){
+          state = await apiJSON('/review/facts/' + encodeURIComponent(c.id), {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ fields }),
+          });
         }
+        // правка могла сама провести кандидата через ворота — тогда подтверждать нечего
+        if (state.status !== 'approved') await apiJSON('/review/facts/' + encodeURIComponent(c.id) + '/approve', { method: 'POST' });
+      } else {
+        await apiJSON('/review/facts/' + encodeURIComponent(c.id) + '/reject', { method: 'POST' });
       }
+      RV.items = RV.items.filter(x => x.id !== c.id);
+      RV.done += 1;
+    } catch (e) {
+      alert('Не удалось: ' + (e.detail || e.message || 'ошибка'));
     }
-    removeItems(processed);
     setBusy(false);
-    showResult(action, processed.length, failed);
-    repaint();
+    paintAll();
     pollReviewCount();
   }
 
-  function reviewCard(c){
-    const card = el('div', 'rcard');
-    const chk = document.createElement('input');
-    chk.type = 'checkbox';
-    chk.className = 'rc-chk';
-    chk.checked = RV.selected.has(c.id);
-    chk.disabled = RV.busy; // repaint может случиться во время операции
-    chk.setAttribute('aria-label', 'выбрать кандидата');
-    chk.addEventListener('change', () => {
-      if (chk.checked) RV.selected.add(c.id);
-      else RV.selected.delete(c.id);
-      updateBulkState();
-    });
-    const body = el('div', 'rc-body');
-    card.append(chk, body);
+  // Клавиши работают, хотя подсказок на экране нет: рука привыкает быстрее глаза
+  const onKey = e => {
+    if (!document.body.contains(wrap)) { document.removeEventListener('keydown', onKey); return; }
+    const t = e.target;
+    if (t && /^(INPUT|SELECT|TEXTAREA)$/.test(t.tagName) && e.key !== 'Enter') return;
+    if (e.key === 'Enter'){ e.preventDefault(); decide('approve'); }
+    else if (e.key === 'ArrowRight'){ RV.index += 1; paintAll(); }
+    else if (e.key === 'ArrowLeft'){ RV.index = Math.max(0, RV.index - 1); paintAll(); }
+  };
+  document.addEventListener('keydown', onKey);
 
-    const p = c.payload || {};
-    if (c.source && c.source.quote) body.append(el('div', 'rq', wrapQuote(c.source.quote)));
-
-    const rx = el('div', 'rx');
-    const bits = [];
-    for (const [label, key] of [['материал', 'material'], ['процесс', 'process'], ['свойство', 'property']]){
-      if (p[key]) bits.push([label, String(p[key])]);
-    }
-    bits.forEach(([label, value], i) => {
-      if (i) rx.append(' · ');
-      rx.append(label + ': ');
-      rx.append(el('b', null, value));
-    });
-    body.append(rx);
-
-    const nums = [];
-    if (p.effect_direction) nums.push('эффект: ' + p.effect_direction + (p.effect_value != null ? ' на ' + p.effect_value + (p.effect_unit || '') : ''));
-    if (p.temperature_c != null) nums.push('T = ' + p.temperature_c + ' °C');
-    if (p.duration_h != null) nums.push('t = ' + p.duration_h + ' ч');
-    if (p.result_value != null) nums.push('результат: ' + p.result_value + (p.result_unit ? ' ' + p.result_unit : ''));
-    if (nums.length) body.append(el('div', 'rx', nums.join(' · ')));
-
-    const meta = [];
-    meta.push('confidence ' + Number(c.confidence || 0).toFixed(2));
-    if (c.source && c.source.document_id)
-      meta.push(docName(c.source.document_id) + ' · ' + fragLoc(c.source.document_id, c.source.page));
-    body.append(el('div', 'rmeta', meta.join(' · ')));
-
-    // замечания валидации: контрактный payload.validation.issues либо фактический number_validation.issues
-    const validation = p.validation || p.number_validation || {};
-    const issues = Array.isArray(validation.issues) ? validation.issues : [];
-    for (const issue of issues) body.append(el('div', 'rwarn', String(issue)));
-    if (c.review_note && !issues.length) body.append(el('div', 'rwarn', c.review_note));
-
-    const acts = el('div', 'racts');
-    const okBtn = el('button', 'ok', 'Подтвердить');
-    const noBtn = el('button', 'no', 'Отклонить');
-    okBtn.disabled = noBtn.disabled = RV.busy; // repaint может случиться во время операции
-    const finish = () => {
-      removeItems([c.id]);
-      repaint();
-      pollReviewCount();
-    };
-    okBtn.addEventListener('click', async () => {
-      if (RV.busy) return;
-      setBusy(true);
-      try {
-        await approveOne(c.id);
-        setBusy(false);
-        finish();
-      } catch (e) {
-        setBusy(false);
-        alert('Не удалось подтвердить: ' + (e.detail || e.message));
-      }
-    });
-    noBtn.addEventListener('click', async () => {
-      if (RV.busy) return;
-      const note = prompt('Причина отклонения (необязательно):', '');
-      if (note === null) return;
-      setBusy(true);
-      try {
-        await rejectOne(c.id, note.trim() || null);
-        setBusy(false);
-        finish();
-      } catch (e) {
-        setBusy(false);
-        alert('Не удалось отклонить: ' + (e.detail || e.message));
-      }
-    });
-    acts.append(okBtn, noBtn);
-    body.append(acts);
-    return card;
-  }
-
+  work.append(el('div', 'belt-empty', 'Загрузка…'));
   Promise.all([apiJSON('/review/facts?status=pending_review'), loadDocs()])
     .then(([cands]) => {
-      if (!document.body.contains(list)) return;
+      if (!document.body.contains(wrap)) return;
       RV.items = Array.isArray(cands) ? cands : [];
-      buildTools();
-      buildBulk();
-      repaint();
+      paintAll();
     })
     .catch(e => {
-      if (!document.body.contains(list)) return;
-      clear(list);
-      list.append(el('div', 'rempty', 'Не удалось загрузить очередь: ' + (e.message || 'ошибка сети')));
+      if (!document.body.contains(wrap)) return;
+      clear(work);
+      work.append(el('div', 'belt-empty', 'Не удалось загрузить очередь: ' + (e.message || 'ошибка сети')));
     });
 }
 
@@ -336,4 +288,4 @@ export async function pollReviewCount(){
     dot.hidden = true; // эндпоинт недоступен — точку прячем
   }
 }
-setInterval(pollReviewCount, 60000);
+setInterval(pollReviewCount, 30000);

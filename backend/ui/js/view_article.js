@@ -7,7 +7,7 @@ import { routeName } from './router.js';
 import { POPULAR, S, docName, docYear, fragLoc, sciLabel } from './state.js';
 import { _SVG_TRASH, dockBtn } from './view_docs.js';
 import { openSources } from './view_sources.js';
-import { hostOf, isWebSrcFormOpen, paintToc, setWebSrcFormOpen, snippetUrl, webSourcesRoster, webSrcOverrides, webSrcSave, webSrcUsed, webUsedKeys } from './web_mode.js';
+import { foundExperiments, hostOf, isWebSrcFormOpen, paintToc, sectionCounts, sectionTitle, setWebSrcFormOpen, snippetUrl, webSourcesRoster, webSrcOverrides, webSrcSave, webSrcUsed, webUsedKeys } from './web_mode.js';
 
 // ---------- скролл-spy оглавления ----------
 // Активная секция = последний заголовок, чей верх поднялся выше «линии чтения»
@@ -154,6 +154,12 @@ window.addEventListener('resize', () => {
 });
 
 
+/** Значение поля или прочерк: заглушки извлечения читателю не показываются. */
+export function plainOr(value){
+  const text = String(value ?? '').trim();
+  return (!text || text === 'не указано' || text === 'Unknown Lab') ? '—' : text;
+}
+
 // Чипы метрик для узкого экрана (≤980px): те же значения, что в карточке
 // «О статье», размещённые одной строкой под заголовком. Видимость управляется CSS —
 // рисуем всегда, показывается только когда карточка и мета-строка скрыты
@@ -190,13 +196,12 @@ export function paintChips(st){
   chip('уверенность', has && r.confidence != null ? pct(r.confidence) : '—');
   chip('научность', has && r.scientific_share != null ? pct(r.scientific_share) : '—');
   chip('документы', has ? String(usedDocsCount(st, r)) : '—');
-  const dg = displayGraph(st);
-  const g = dg.graph;
-  const gChip = chip(dg.related ? 'граф смежных' : 'граф',
+  const g = displayGraph(st);
+  const gChip = chip('граф',
     has ? (g.nodes || []).length + '/' + (g.edges || []).length : '—');
   if ((g.nodes || []).length){
     activate(gChip, () => openGraphOverlay(st), 'button');
-    gChip.append(' →'); // стрелка — подсказка кликабельности (макет «граф 61/85 →»)
+    gChip.append(' →'); // стрелка — подсказка кликабельности
   }
 }
 
@@ -343,17 +348,15 @@ export function paintInfobox(st){
   // числа сносок внизу статьи это счёт по документам, а не по фрагментам
   const docCount = usedDocsCount(st, r);
   addRow('Документы', has ? String(docCount) : '—', has ? null : 'na');
-  const dg = displayGraph(st);
-  const g = dg.graph;
+  const g = displayGraph(st);
   addRow('Узлы / связи',
     has ? ((g.nodes || []).length + ' / ' + (g.edges || []).length) : '—',
     has ? null : 'na');
 
-  // зона мини-графа присутствует всегда; до данных — статичный «—» без анимаций.
-  // Смежный граф (partial-ответ) подписан явно — не выдаётся за прямой
+  // зона мини-графа присутствует всегда; до данных — статичный «—» без анимаций
   const mg = el('div', 'minigraph');
   const cap = el('div', 'cap');
-  cap.append(el('span', null, dg.related ? 'Граф смежных данных' : 'Граф'));
+  cap.append(el('span', null, 'Граф'));
   if ((g.nodes || []).length){
     const expand = el('button', null, 'развернуть →');
     expand.addEventListener('click', () => openGraphOverlay(st));
@@ -378,7 +381,7 @@ export function paintAnswer(st){
   clear(body);
   if (st.phase === 'done'){
     const r = st.final || {};
-    if (r.llm_error) body.append(el('div', 'llmerr', 'Генерация деградировала: ' + r.llm_error));
+    if (r.llm_error) body.append(el('div', 'llmerr', r.llm_error));
     body.append(richParagraphs(st, r.summary || ''));
     return;
   }
@@ -389,25 +392,36 @@ export function paintAnswer(st){
   (lastP || body).append(el('span', 'cursor'));
 }
 
-export function paintFinalSections(st){
-  const r = st.final || {};
-  // сноски строим заново с чистой нумерацией: финальный summary — источник истины
+// Секции ниже ответа. Рисуются с события evidence, а не с финала: факты,
+// источники и граф приходят в предпросмотре за доли секунды, тогда как текст
+// модель пишет десятки секунд. Состав секций берётся из sectionCounts — того
+// же счётчика, по которому строится оглавление, иначе содержание обещает
+// секции, которых в документе нет, и переход по ним уводит в начало статьи
+export function paintSections(st){
+  const r = respOf(st);
+  const counts = sectionCounts(st);
+  // сноски строим заново с чистой нумерацией: перерисовка — источник истины
   st.noteMap = new Map();
   st.notes = [];
   paintAnswer(st);
 
   const rest = $('#sec-rest');
   if (!rest) return;
+  // полосы ненаписанного текста снимаются только по готовности ответа —
+  // во время генерации они и есть признак того, что текст ещё пишется
+  const skeleton = $('#skels');
+  if (skeleton && st.phase === 'done') skeleton.remove();
   clear(rest);
-  const sec = (key, title) => {
+  // заголовок берётся из общего списка секций — тот же, что в оглавлении
+  const sec = (key) => {
     const w = el('div'); w.id = 'sec-' + key;
-    w.append(el('div', 'sec-h', title));
+    w.append(el('div', 'sec-h', sectionTitle(key)));
     rest.append(w);
     return w;
   };
 
-  if ((r.contradictions || []).length){
-    const w = sec('conf', 'Противоречия');
+  if (counts.conf){
+    const w = sec('conf');
     for (const c of r.contradictions){
       const d = el('div', 'conflict');
       d.append(el('span', 'flag', '⚑'));
@@ -415,16 +429,16 @@ export function paintFinalSections(st){
       w.append(d);
     }
   }
-  if ((r.gaps || []).length){
-    const w = sec('gaps', 'Пробелы');
+  if (counts.gaps){
+    const w = sec('gaps');
     for (const gp of r.gaps){
       const d = el('div', 'gap');
       appendRich(st, d, String(gp));
       w.append(d);
     }
   }
-  if ((r.hypotheses || []).length){
-    const w = sec('hyp', 'Гипотезы');
+  if (counts.hyp){
+    const w = sec('hyp');
     for (const h of r.hypotheses){
       const p = el('p', 'hyp');
       p.append(el('span', 'mark', 'Косвенно'));
@@ -432,18 +446,14 @@ export function paintFinalSections(st){
       w.append(p);
     }
   }
-  if ((r.experiments || []).length){
-    const w = sec('facts', 'Прямые факты и эксперименты');
-    w.append(expTable(st, r.experiments));
-  }
-  if (r.evidence_status === 'partial' && (r.related_experiments || []).length){
-    const w = sec('rel', 'Смежные данные');
-    w.append(expTable(st, r.related_experiments));
+  if (counts.facts){
+    const w = sec('facts');
+    w.append(expTable(st, foundExperiments(r)));
   }
   // секции «Внешние источники» в базовом ответе нет: веб-ответ доступен
   // через переключатель-глобус (final.web_answer в контракте отсутствует)
   if (st.notes.length){
-    const w = sec('notes', 'Источники');
+    const w = sec('notes');
     const ol = el('ol', 'refs');
     for (const note of st.notes) ol.append(noteLi(st, note));
     w.append(ol);
@@ -518,14 +528,22 @@ export function expTable(st, rows){
   const wrap = el('div', 'tblwrap');
   const t = el('table', 'exp');
   const head = el('tr');
-  for (const h of ['Материал', 'Процесс', 'T, °C', 'Свойство', 'Эффект', 'Лаб.', 'Ист.']) head.append(el('th', null, h));
+  // «Значение» — то, ради чего факт извлекался: без него измерения одного и
+  // того же свойства выглядят одинаковыми строками. «Образец» их различает
+  // (год, номер опыта). Колонка «Лаб.» убрана: заполнена у 3 % фактов, а место
+  // занимала наравне с остальными; лабораторию видно в форме проверки
+  for (const h of ['Материал', 'Процесс', 'Свойство', 'Значение', 'Образец', 'T, °C', 'Эффект', 'Ист.'])
+    head.append(el('th', null, h));
   t.append(head);
   for (const row of rows){
     const tr = el('tr');
     tr.append(el('td', null, row.material || '—'));
     tr.append(el('td', null, row.process || '—'));
-    tr.append(el('td', null, row.temperature_c != null ? String(row.temperature_c) : '—'));
     tr.append(el('td', null, row.property || '—'));
+    tr.append(el('td', 'num', row.result_value != null
+      ? `${row.result_value}${row.result_unit ? ' ' + row.result_unit : ''}` : '—'));
+    tr.append(el('td', null, plainOr(row.sample)));
+    tr.append(el('td', 'num', row.temperature_c != null ? String(row.temperature_c) : '—'));
     const eff = String(row.effect || '—');
     const low = eff.toLowerCase();
     const up = low.startsWith('рост') || low.startsWith('increase') || low.startsWith('увелич');
@@ -533,7 +551,6 @@ export function expTable(st, rows){
     const td = el('td', up ? 'up' : (down ? 'down' : null));
     td.textContent = (up ? '▲ ' : down ? '▼ ' : '') + eff;
     tr.append(td);
-    tr.append(el('td', null, row.lab && row.lab !== 'Unknown Lab' ? row.lab : '—'));
     const tdRef = el('td');
     const note = noteForSource(st, row.source);
     if (note) tdRef.append(supFor(st, note));
