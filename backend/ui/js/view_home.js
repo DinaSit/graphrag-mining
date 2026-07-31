@@ -1,6 +1,6 @@
 import { ask } from './ask.js';
 import { apiJSON, el, searchIcon } from './dom.js';
-import { POPULAR, docName, loadDocs, recentList } from './state.js';
+import { POPULAR, docName, hiddenDocIds, loadDocs, recentList } from './state.js';
 
 // ==================================================================
 // Главная
@@ -84,22 +84,32 @@ export function dykField(v){
   const s = String(v == null ? '' : v).trim();
   return DYK_EMPTY.has(s.toLowerCase()) ? null : s;
 }
-// Разбор факта в готовые куски фразы; null — факт для карточки не годится
+// Разбор факта в готовые куски фразы; null — факт для карточки не годится.
+// value — выделяемая часть: направление эффекта либо измеренное значение
 export function dykPhrase(fact){
   if (!fact) return null;
   const material = dykField(fact.material);
   const property = dykField(fact.property);
   if (!material || !property) return null;
+  const process = dykField(fact.process);
   const d = String(fact.effect_direction || '').toLowerCase();
   let dir = null;
   if (d === 'increase' || d === 'рост') dir = 'рост';
   else if (d === 'decrease' || d === 'снижение') dir = 'снижение';
   else if (d === 'neutral' || d === 'без изменений') dir = 'без изменений';
-  if (!dir) return null;
-  let val = '';
-  if (dir !== 'без изменений' && fact.effect_value != null)
-    val = ' на ' + fact.effect_value + (dykField(fact.effect_unit) || '');
-  return { material, property, dir, val, process: dykField(fact.process) };
+  if (dir){
+    const val = (dir !== 'без изменений' && fact.effect_value != null)
+      ? ' на ' + fact.effect_value + (dykField(fact.effect_unit) || '') : '';
+    return { material, property, value: dir + val, process };
+  }
+  // Направление эффекта заполнено у меньшинства фактов: почти все измеряют
+  // величину, а не её изменение. Такой факт для карточки годится — выделяемой
+  // частью становится само значение с единицей
+  if (fact.result_value != null){
+    const unit = dykField(fact.result_unit);
+    return { material, property, value: fact.result_value + (unit ? ' ' + unit : ''), process };
+  }
+  return null;
 }
 
 export async function fillDyk(dyk){
@@ -107,7 +117,7 @@ export async function fillDyk(dyk){
   // до 4 попыток: эндпоинт может отдавать один факт или массив — перебираем всё
   for (let attempt = 0; attempt < 4 && !fact; attempt++){
     let data = null;
-    try { data = await apiJSON('/facts/random'); }
+    try { data = await apiJSON('/facts/random?hidden=' + encodeURIComponent(hiddenDocIds().join(','))); }
     catch (_) { break; } // 404 или эндпоинт ещё не готов — карточку не показываем
     const pool = Array.isArray(data && data.facts) ? data.facts : [data && data.fact];
     for (const f of pool){
@@ -124,9 +134,10 @@ export async function fillDyk(dyk){
   if (teaser){
     f.append(teaser); // «…что …?» уже сформулировано LLM целиком
   } else {
-    // механическая сборка: «…что <материал>: «<свойство>» — <рост|снижение>[ на N%][ при «<процесс>»]?»
+    // механическая сборка: «…что <материал>: «<свойство>» — <значение или
+    // направление эффекта>[ при «<процесс>»]?»
     f.append('…что ' + ph.material + ': «' + ph.property + '» — ');
-    f.append(el('b', null, ph.dir + ph.val));
+    f.append(el('b', null, ph.value));
     if (ph.process) f.append(' при «' + ph.process + '»');
     f.append('?');
   }

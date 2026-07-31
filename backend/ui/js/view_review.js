@@ -1,3 +1,5 @@
+import { apiAction } from './auth.js';
+import { showNotice } from './dialog.js';
 import { $, apiJSON, clear, el, trunc, wrapQuote } from './dom.js';
 import { docName, docsCache, loadDocs } from './state.js';
 import { paintSourceDoc } from './view_sources.js';
@@ -230,21 +232,21 @@ export function viewReview(view){
         const fields = editedFields(c);
         let state = c;
         if (fields){
-          state = await apiJSON('/review/facts/' + encodeURIComponent(c.id), {
+          state = await apiAction('/review/facts/' + encodeURIComponent(c.id), {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ fields }),
           });
         }
         // правка могла сама провести кандидата через ворота — тогда подтверждать нечего
-        if (state.status !== 'approved') await apiJSON('/review/facts/' + encodeURIComponent(c.id) + '/approve', { method: 'POST' });
+        if (state.status !== 'approved') await apiAction('/review/facts/' + encodeURIComponent(c.id) + '/approve', { method: 'POST' });
       } else {
-        await apiJSON('/review/facts/' + encodeURIComponent(c.id) + '/reject', { method: 'POST' });
+        await apiAction('/review/facts/' + encodeURIComponent(c.id) + '/reject', { method: 'POST' });
       }
       RV.items = RV.items.filter(x => x.id !== c.id);
       RV.done += 1;
     } catch (e) {
-      alert('Не удалось: ' + (e.detail || e.message || 'ошибка'));
+      showNotice('Решение не сохранено', e.detail || e.message || 'ошибка');
     }
     setBusy(false);
     paintAll();

@@ -1,3 +1,4 @@
+import { apiAction } from './auth.js';
 import { $, apiJSON, clear, el, trunc } from './dom.js';
 import { render, routeName } from './router.js';
 import { S, loadDocs } from './state.js';
@@ -41,7 +42,7 @@ export async function uploadOne(file){
   try {
     const fd = new FormData();
     fd.append('file', file, file.name);
-    const data = await apiJSON('/ingest', { method: 'POST', body: fd });
+    const data = await apiAction('/ingest', { method: 'POST', body: fd });
     if (data.job_id){
       entry.status = 'в очереди';
       pollJob(entry, data.job_id);

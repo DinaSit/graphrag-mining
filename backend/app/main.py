@@ -14,7 +14,7 @@ import httpx
 from pydantic import BaseModel, Field
 
 try:
-    from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
+    from fastapi import Body, Depends, FastAPI, File, Form, HTTPException, UploadFile
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import RedirectResponse, Response, StreamingResponse
     from fastapi.staticfiles import StaticFiles
@@ -22,6 +22,7 @@ try:
 except ImportError as exc:  # pragma: no cover - helps local smoke tests without installed deps
     raise RuntimeError("Install backend dependencies from backend/requirements.txt to run the API.") from exc
 
+from app.auth import require_editor
 from app.file_storage import MinioFileStorage
 from app.jobs import IngestQueue
 from app.persistence import Neo4jSink, PostgresSink
@@ -31,13 +32,17 @@ from app.pipeline.llm_bridge import LLM_CHAT_URL, LLMUnavailableError, SummarySt
 from app.schemas import (
     CandidateStatus,
     DocumentStatus,
-    DocumentVisibilityRequest,
     GraphPayload,
     QueryRequest,
     QueryResponse,
     RejectFactRequest,
 )
-from app.storage import ApplicationStore, SourceRequiredError
+from app.storage import (
+    ApplicationStore,
+    SourceRequiredError,
+    reset_hidden_documents,
+    use_hidden_documents,
+)
 
 log = logging.getLogger(__name__)
 
@@ -95,9 +100,16 @@ app = FastAPI(
     description="GraphRAG-энциклопедия по научным документам: инжест, граф знаний, ответы с цитатами.",
 )
 
+# Кому браузер разрешает обращаться к API из другого источника. Интерфейс
+# отдаётся тем же сервером, поэтому обычной работе CORS не нужен вовсе:
+# список по умолчанию покрывает только локальный запуск. Раньше здесь стояло
+# «любой источник» вместе с credentials — сервер подтверждал чужому сайту
+# право слать себе DELETE. Другой адрес (туннель, отдельный хост UI)
+# задаётся переменной CORS_ORIGINS через запятую.
+_CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_CORS_ORIGINS or ["http://localhost:8000", "http://127.0.0.1:8000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -128,6 +140,26 @@ if UI_DIR.is_dir():
     app.mount("/ui", RevalidatedStaticFiles(directory=str(UI_DIR), html=True), name="ui")
 else:
     log.warning("UI не смонтирован: каталог %s не найден", UI_DIR)
+
+
+@app.middleware("http")
+async def _no_store_api(request, call_next):
+    """Ответы API не кэшируются браузером.
+
+    Без Cache-Control браузер применяет к GET-ответу собственную эвристику и
+    показывает прежние данные: случайный факт не менялся при перезагрузке
+    страницы, список документов после загрузки мог остаться прежним. Данные
+    системы меняются в любой момент, поэтому кэшировать их нельзя.
+
+    Исключения — ответы, которые уже выбрали себе политику: статика UI
+    (no-cache с ETag, см. RevalidatedStaticFiles) и файлы документов, где
+    повторная выдача многомегабайтного PDF при каждом открытии дороже
+    возможной задержки обновления.
+    """
+    response = await call_next(request)
+    if not request.url.path.startswith("/ui") and "cache-control" not in response.headers:
+        response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.get("/", include_in_schema=False)
@@ -256,7 +288,11 @@ async def ask(request: QueryRequest):
     # отвечаются мгновенно, без LLM, графа и эмбеддингов
     if orchestrator.is_offtopic(request.question):
         return orchestrator.offtopic_response()
-    return await orchestrator.answer(request)
+    token = use_hidden_documents(request.hidden_documents)
+    try:
+        return await orchestrator.answer(request)
+    finally:
+        reset_hidden_documents(token)
 
 
 def _sse_event(name: str, payload: dict) -> str:
@@ -292,6 +328,7 @@ async def _ask_stream_events(request: QueryRequest):
 
     # Конвейер orchestrator.answer() развёрнут здесь по шагам — отсюда обращения
     # к его приватным методам: между этапами нужно вставлять SSE-события
+    token = use_hidden_documents(request.hidden_documents)
     try:
         evidence = await orchestrator.collect_evidence(request)
         yield _sse_event("evidence", orchestrator.evidence_preview(evidence))
@@ -336,6 +373,8 @@ async def _ask_stream_events(request: QueryRequest):
             evidence_status="none",
         )
         yield _sse_event("final", fallback.model_dump(mode="json"))
+    finally:
+        reset_hidden_documents(token)
 
 
 @app.post("/ask/stream")
@@ -345,7 +384,7 @@ async def ask_stream(request: QueryRequest):
     return StreamingResponse(_ask_stream_events(request), media_type="text/event-stream")
 
 
-@app.post("/ingest")
+@app.post("/ingest", dependencies=[Depends(require_editor)])
 async def ingest(
     file: UploadFile = File(...),
     document_type: str | None = Form(default=None),
@@ -384,7 +423,7 @@ def job_status(job_id: str):
 
 
 @app.get("/facts/random")
-async def random_fact():
+async def random_fact(hidden: str = ""):
     """Один случайный approved-факт из нескрытого документа (функция UI).
 
     Контракт «Знаете ли вы?»: когда LLM-формулировка факта готова (кэш dyk),
@@ -394,7 +433,13 @@ async def random_fact():
     # dyk.pick предпочитает уже подготовленный факт (главная страница почти
     # всегда получает готовую формулировку) и параллельно запускает фоновый
     # прогрев пула; холодный старт — показ без формулировки + фоновая генерация
-    fact, phrased = dyk.pick(store)
+    # Скрытые документы приходят строкой id через запятую: запрос GET,
+    # тела у него нет
+    token = use_hidden_documents([i for i in hidden.split(",") if i])
+    try:
+        fact, phrased = dyk.pick(store)
+    finally:
+        reset_hidden_documents(token)
     if fact is None:
         raise HTTPException(status_code=404, detail="Нет ни одного подходящего факта")
     payload = {"fact": fact.model_dump(mode="json")}
@@ -464,7 +509,10 @@ def get_document_original(document_id: str):
     ascii_name = clean_name.encode("ascii", "ignore").decode() or "document"
     ascii_name = ascii_name.replace("\\", "\\\\").replace('"', '\\"')
     header = f"{disposition}; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(clean_name, safe='')}"
-    return Response(content=content, media_type=media_type, headers={"Content-Disposition": header})
+    # private: кэш только в браузере читателя, не в промежуточных узлах;
+    # тело по этому адресу не меняется — новая загрузка создаёт новый документ
+    return Response(content=content, media_type=media_type,
+                    headers={"Content-Disposition": header, "Cache-Control": "private, max-age=300"})
 
 
 @app.get("/documents/{document_id}/preview")
@@ -482,11 +530,12 @@ def get_document_preview(document_id: str):
     return Response(
         content=content,
         media_type="application/pdf",
-        headers={"Content-Disposition": 'inline; filename="preview.pdf"'},
+        headers={"Content-Disposition": 'inline; filename="preview.pdf"',
+                 "Cache-Control": "private, max-age=300"},
     )
 
 
-@app.post("/documents/{document_id}/reprocess")
+@app.post("/documents/{document_id}/reprocess", dependencies=[Depends(require_editor)])
 def reprocess_document_endpoint(document_id: str):
     """Повторная обработка документа через LLM: пере-извлечение кандидатов по
     сохранённым фрагментам (отклонённые экспертом кандидаты не перезаписываются)
@@ -515,17 +564,7 @@ def reprocess_document_endpoint(document_id: str):
     return {"status": "processing", "document_id": document_id}
 
 
-@app.post("/documents/{document_id}/visibility")
-def set_document_visibility(document_id: str, request: DocumentVisibilityRequest):
-    """Скрывает/показывает документ во всех ответах. Данные не удаляются,
-    Neo4j не перестраивается — фильтрация выполняется на стороне backend."""
-    try:
-        return store.set_document_visibility(document_id, request.hidden)
-    except KeyError:
-        raise HTTPException(status_code=404, detail="Document not found")
-
-
-@app.delete("/documents/{document_id}")
+@app.delete("/documents/{document_id}", dependencies=[Depends(require_editor)])
 def delete_document(document_id: str):
     """Удаляет документ и всё извлечённое из него (фрагменты, факты, узлы графа)."""
     try:
@@ -554,7 +593,7 @@ def review_facts(status: CandidateStatus | None = None):
     return candidates
 
 
-@app.post("/review/facts/{candidate_id}/approve")
+@app.post("/review/facts/{candidate_id}/approve", dependencies=[Depends(require_editor)])
 def approve_fact(candidate_id: str):
     if candidate_id not in store.candidates:
         raise HTTPException(status_code=404, detail="Candidate not found")
@@ -569,7 +608,7 @@ class CandidateFieldsRequest(BaseModel):
     fields: dict[str, Any]
 
 
-@app.patch("/review/facts/{candidate_id}")
+@app.patch("/review/facts/{candidate_id}", dependencies=[Depends(require_editor)])
 def edit_candidate(candidate_id: str, body: CandidateFieldsRequest):
     """Правка полей кандидата экспертом: проверки прогоняются заново, и если
     кандидат начинает проходить ворота — он тут же становится фактом."""
@@ -581,7 +620,7 @@ def edit_candidate(candidate_id: str, body: CandidateFieldsRequest):
         raise HTTPException(status_code=400, detail=str(exc))
 
 
-@app.post("/review/facts/{candidate_id}/reject")
+@app.post("/review/facts/{candidate_id}/reject", dependencies=[Depends(require_editor)])
 def reject_fact(candidate_id: str, body: RejectFactRequest | None = Body(default=None)):
     if candidate_id not in store.candidates:
         raise HTTPException(status_code=404, detail="Candidate not found")
@@ -596,7 +635,7 @@ class BulkReviewRequest(BaseModel):
     note: str | None = None
 
 
-@app.post("/review/facts/bulk")
+@app.post("/review/facts/bulk", dependencies=[Depends(require_editor)])
 def bulk_review_facts(body: BulkReviewRequest):
     """Пакетная проверка кандидатов: ошибка по одному id не прерывает пачку."""
     processed = 0

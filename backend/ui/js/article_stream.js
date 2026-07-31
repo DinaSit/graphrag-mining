@@ -1,7 +1,7 @@
 import { ask } from './ask.js';
 import { saveArticle } from './article_store.js';
 import { render, routeName } from './router.js';
-import { S, loadDocs } from './state.js';
+import { S, hiddenDocIds, loadDocs } from './state.js';
 import { paintAnswer, paintSections, recalcSpy, updateTocSpy } from './view_article.js';
 
 // ==================================================================
@@ -38,7 +38,7 @@ export async function startStream(st){
     const res = await fetch('/ask/stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question: st.question }),
+      body: JSON.stringify({ question: st.question, hidden_documents: hiddenDocIds() }),
       signal: st.ctrl.signal,
     });
     if (!res.ok) throw new Error('backend ответил HTTP ' + res.status);

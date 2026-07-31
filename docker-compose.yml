@@ -92,6 +92,13 @@ services:
       # Без EMBEDDINGS_URL работает deterministic-hash (64 измерения);
       # размерность колонки vector в PostgreSQL должна совпадать с провайдером
       EMBEDDING_DIM: "64"
+      # Пара для действий, меняющих базу знаний (загрузка, удаление, повторная
+      # обработка, решения по кандидатам). Пустое любое из значений выключает
+      # проверку: локальный запуск без настройки не ломается
+      ADMIN_USER: ${ADMIN_USER:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      # Источники для CORS через запятую; пусто — только localhost
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
       PYTHONPATH: /app/backend
     volumes:
       # Та же доменная конфигурация, что у ml-extraction: правки synonyms.csv и

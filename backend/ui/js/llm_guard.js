@@ -1,4 +1,4 @@
-import { $, el } from './dom.js';
+import { showNotice } from './dialog.js';
 import { S } from './state.js';
 
 // ==================================================================
@@ -23,32 +23,11 @@ export function llmBlockReason(){
 }
 
 export function showBlocked(reason){
-  if ($('#llmblock')) return;
-  const overlay = el('div', 'goverlay');
-  overlay.id = 'llmblock';
-  const panel = el('div', 'panel narrow');
-  const cap = el('div', 'cap');
-  cap.append(el('div', 't', 'Действие недоступно'));
-  panel.append(cap);
-  panel.append(el('p', 'blocktext',
+  showNotice('Действие недоступно',
     'Невозможно выполнить действие, пока ' + reason + '. Загрузка, удаление и ' +
-    'перезагрузка документов заново извлекают факты и требуют основной модели.'));
-  const ok = el('button', 'blockok', 'Понятно');
-  // Обработчик Escape живёт ровно столько же, сколько окно: он висит на
-  // document, и снять его должно любое закрытие, а не только сам Escape
-  const close = () => {
-    overlay.remove();
-    document.removeEventListener('keydown', onKey);
-  };
-  const onKey = event => { if (event.key === 'Escape') close(); };
-  ok.addEventListener('click', close);
-  overlay.addEventListener('click', event => { if (event.target === overlay) close(); });
-  document.addEventListener('keydown', onKey);
-  panel.append(ok);
-  overlay.append(panel);
-  document.body.append(overlay);
-  ok.focus();
+    'перезагрузка документов заново извлекают факты и требуют основной модели.');
 }
+
 
 /** Пропускает действие или показывает окно с причиной отказа. */
 export function allowKnowledgeChange(){

@@ -1,6 +1,8 @@
-import { apiJSON, clear, el } from './dom.js';
+import { apiAction } from './auth.js';
+import { askConfirm, showNotice } from './dialog.js';
+import { clear, el } from './dom.js';
 import { gotoRoute, render, routeName } from './router.js';
-import { docFragCache, loadDocs, sciLabel } from './state.js';
+import { docFragCache, isDocHidden, loadDocs, sciLabel, toggleDocHidden } from './state.js';
 import { allowKnowledgeChange } from './llm_guard.js';
 import { plural } from './view_home.js';
 import { docPreviewSrc, openDocView } from './view_sources.js';
@@ -12,6 +14,11 @@ import { docPreviewSrc, openDocView } from './view_sources.js';
 // справа ВСЕГДА открыта панель выбранного документа (превью, обоснование LLM,
 // счётчики графа, действия). При входе выбран первый документ.
 export let dockDocId = null; // id документа в досье; сохраняется между перерисовками раздела
+
+// Перерисовка списка и счётчика без пересборки досье. Задаётся viewDocs,
+// вызывается при локальном скрытии: перерисовывать раздел целиком незачем —
+// на сервере ничего не изменилось, а пересоздание досье перезагружает превью
+let repaintDocList = null;
 
 export function viewDocs(view){
   const wrap = el('div', 'docs');
@@ -39,14 +46,14 @@ export function viewDocs(view){
       dock.style.display = 'none'; // при пустом корпусе досье не отображается
       return;
     }
-    const hiddenCount = list.filter(d => d.hidden).length;
-
-    const renderRows = () => {
+    const renderRows = (keepDock) => {
       const visible = docsFiltered(list);
+      // считается при каждой перерисовке: набор скрытых меняется на месте
+      const hiddenCount = list.filter(d => isDocHidden(d.id)).length;
       hint.textContent = (visible.length < list.length
         ? visible.length + ' из ' + list.length + ' ' + plural(list.length, 'документа', 'документов', 'документов')
         : list.length + ' ' + plural(list.length, 'документ', 'документа', 'документов'))
-        + (hiddenCount ? ' · ' + hiddenCount + ' ' + plural(hiddenCount, 'скрыт', 'скрыто', 'скрыто') + ' из графа' : '');
+        + (hiddenCount ? ' · ' + hiddenCount + ' ' + plural(hiddenCount, 'скрыт', 'скрыто', 'скрыто') + ' у вас' : '');
       clear(lst);
       if (!visible.length){
         lst.append(el('div', 'vempty', 'Под выбранные фильтры ничего не попало.'));
@@ -57,10 +64,17 @@ export function viewDocs(view){
       for (const d of visible) lst.append(docListRow(d, lst, dock));
       // досье открыто всегда: выбранный ранее документ, иначе — первый видимый
       const opened = (dockDocId && visible.find(x => x.id === dockDocId)) || visible[0];
-      openDock(opened, lst, dock);
+      if (keepDock){
+        // досье не пересобирается: внутри него iframe с превью, и его повторное
+        // создание перезагружает PDF — это и выглядит как мигание страницы
+        for (const r of lst.querySelectorAll('.docrow')) r.classList.toggle('sel', r.dataset.id === opened.id);
+      } else {
+        openDock(opened, lst, dock);
+      }
     };
+    repaintDocList = () => { if (document.body.contains(lst)) renderRows(true); };
 
-    dt.after(docControls(list, renderRows));
+    dt.after(docControls(list, () => renderRows()));
     renderRows();
   });
 }
@@ -207,7 +221,7 @@ export function docTitleEl(name){
 }
 
 export function docListRow(d, lst, dock){
-  const row = el('div', 'docrow' + (d.hidden ? ' dim' : ''));
+  const row = el('div', 'docrow' + (isDocHidden(d.id) ? ' dim' : ''));
   row.dataset.id = d.id;
   row.append(docTitleEl(d.filename || d.id));
   // мета-строка без прочерков: показываем только известные признаки —
@@ -223,7 +237,7 @@ export function docListRow(d, lst, dock){
   if (d.element_count != null) parts.push(d.element_count + ' фрагм.');
   if (d.status === 'processing') parts.push('обрабатывается…');
   if (d.status === 'failed') parts.push('обработка не удалась');
-  if (d.hidden) parts.push('скрыт из графа');
+  if (isDocHidden(d.id)) parts.push('скрыт у вас');
   m.append(parts.join(' · '));
   row.append(m);
   row.addEventListener('click', () => openDock(d, lst, dock));
@@ -303,19 +317,19 @@ export function openDock(d, lst, dock){
   // loadDocs(true)) — результат отдельного fetch перед ним был бы отброшен
   const rerender = async () => { if (routeName() === 'docs') render(); else await loadDocs(true); };
 
-  const eye = dockBtn(d.hidden ? 'eye-off' : null, d.hidden ? 'Вернуть в Граф' : 'Скрыть из Графа',
-    d.hidden ? _SVG_EYE_OFF : _SVG_EYE);
-  eye.addEventListener('click', async () => {
-    try {
-      await apiJSON('/documents/' + encodeURIComponent(d.id) + '/visibility', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ hidden: !d.hidden }),
-      });
-      await rerender();
-    } catch (e) {
-      alert('Не удалось изменить видимость: ' + (e.detail || e.message));
-    }
+  // Скрытие локальное: ничего не отправляется и не меняется в базе, поэтому
+  // и вход не спрашивается. Документ выпадает из ответов только у этого читателя
+  const wasHidden = isDocHidden(d.id);
+  const eye = dockBtn(wasHidden ? 'eye-off' : null,
+    wasHidden ? 'Вернуть в свою базу' : 'Скрыть из своей базы',
+    wasHidden ? _SVG_EYE_OFF : _SVG_EYE);
+  eye.addEventListener('click', () => {
+    const nowHidden = toggleDocHidden(d.id);
+    eye.classList.toggle('eye-off', nowHidden);
+    eye.title = nowHidden ? 'Вернуть в свою базу' : 'Скрыть из своей базы';
+    eye.setAttribute('aria-label', eye.title);
+    eye.innerHTML = nowHidden ? _SVG_EYE_OFF : _SVG_EYE;
+    if (repaintDocList) repaintDocList();
   });
   acts.append(eye);
 
@@ -324,10 +338,10 @@ export function openDock(d, lst, dock){
     if (d.status === 'processing') return; // уже идёт
     if (!allowKnowledgeChange()) return;
     try {
-      await apiJSON('/documents/' + encodeURIComponent(d.id) + '/reprocess', { method: 'POST' });
+      await apiAction('/documents/' + encodeURIComponent(d.id) + '/reprocess', { method: 'POST' });
       await rerender(); // строка и досье покажут «обрабатывается…»
     } catch (e) {
-      alert('Перезагрузка не запустилась: ' + (e.detail || e.message));
+      showNotice('Перезагрузка не запустилась', e.detail || e.message);
     }
   });
   acts.append(rf);
@@ -335,14 +349,21 @@ export function openDock(d, lst, dock){
   const del = dockBtn('trash', 'Удалить', _SVG_TRASH);
   del.addEventListener('click', async () => {
     if (!allowKnowledgeChange()) return;
-    if (!confirm('Удалить «' + (d.filename || d.id) + '» и всё извлечённое из него? Это необратимо.')) return;
+    const ok = await askConfirm({
+      title: 'Удалить документ?',
+      text: '«' + (d.filename || d.id) + '» и всё извлечённое из него: фрагменты, факты, узлы графа. '
+        + 'Восстановить не получится — документ придётся загружать заново.',
+      confirmLabel: 'Удалить',
+      danger: true,
+    });
+    if (!ok) return;
     try {
-      await apiJSON('/documents/' + encodeURIComponent(d.id), { method: 'DELETE' });
+      await apiAction('/documents/' + encodeURIComponent(d.id), { method: 'DELETE' });
       docFragCache.delete(d.id);
       dockDocId = null;
       await rerender();
     } catch (e) {
-      alert('Удаление не завершено: ' + (e.detail || e.message));
+      showNotice('Удаление не завершено', e.detail || e.message);
     }
   });
   acts.append(del);

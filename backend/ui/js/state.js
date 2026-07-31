@@ -81,3 +81,25 @@ export const S = {
   health: { data: null, failed: false, at: 0, color: 'ok', pinned: false },
   uploads: [],     // [{name, status, kind, error}]; kind: wait | ok | err — цвет статуса в плашке
 };
+
+// ---------- скрытые документы ----------
+// Выбор читателя, а не состояние системы: набор живёт в sessionStorage вкладки
+// и уезжает с каждым вопросом. У другого человека и в другой вкладке те же
+// документы остаются видимыми; закрытие вкладки возвращает базу целиком.
+const HIDDEN_KEY = 'graphrag-hidden-docs';
+
+function readHidden(){
+  try { return new Set(JSON.parse(sessionStorage.getItem(HIDDEN_KEY) || '[]')); }
+  catch (_) { return new Set(); }
+}
+
+let hiddenDocs = readHidden();
+
+export function hiddenDocIds(){ return [...hiddenDocs]; }
+export function isDocHidden(id){ return hiddenDocs.has(id); }
+
+export function toggleDocHidden(id){
+  if (hiddenDocs.has(id)) hiddenDocs.delete(id); else hiddenDocs.add(id);
+  try { sessionStorage.setItem(HIDDEN_KEY, JSON.stringify([...hiddenDocs])); } catch (_) {}
+  return hiddenDocs.has(id);
+}

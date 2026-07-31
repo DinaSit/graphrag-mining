@@ -54,9 +54,6 @@ class DocumentRecord(BaseModel):
     # конвертация через LibreOffice; None — превью нет (не создано/сбой)
     preview_object: str | None = None
     created_at: str
-    # Скрытый документ полностью выпадает из ответов (факты, поиск, граф),
-    # но данные не удаляются и Neo4j не перестраивается
-    hidden: bool = False
     # Признаки документа (см. pipeline/document_traits.py); None — не вычислен.
     # is_scientific и doc_type — LLM-классификация по титульнику, обоснование
     # в trait_reason; origin — эвристика по языку текста
@@ -160,6 +157,10 @@ class QueryFilters(BaseModel):
 
 class QueryRequest(BaseModel):
     question: str
+    # Документы, скрытые читателем: приезжают с каждым запросом и исключают
+    # свои факты, фрагменты и узлы графа из ответа. Выбор читателя, а не
+    # состояние системы — у другого те же документы остаются видимыми
+    hidden_documents: list[str] = Field(default_factory=list)
     filters: QueryFilters = Field(default_factory=QueryFilters)
     include_hypotheses: bool = False
     confidence_min: float = 0.0
@@ -251,10 +252,6 @@ class ParsedQuestion(BaseModel):
     entities: list[QueryEntity] = Field(default_factory=list)
     conditions: list[QueryCondition] = Field(default_factory=list)
     target: QueryCondition | None = None
-
-
-class DocumentVisibilityRequest(BaseModel):
-    hidden: bool
 
 
 class RejectFactRequest(BaseModel):

@@ -35,7 +35,7 @@ log = logging.getLogger(__name__)
 _DOC_COLUMNS = (
     "id", "filename", "document_type", "source_label", "access_level", "checksum",
     "current_version_id", "status", "element_count", "storage_bucket", "storage_object",
-    "storage_uri", "created_at", "hidden", "is_scientific", "origin", "year",
+    "storage_uri", "created_at", "is_scientific", "origin", "year",
     "preview_object", "doc_type", "trait_reason", "authors",
 )
 
@@ -43,7 +43,6 @@ _DOC_COLUMNS = (
 def _document_from_row(row: tuple) -> DocumentRecord:
     """Строка БД (в порядке _DOC_COLUMNS) → DocumentRecord."""
     data = dict(zip(_DOC_COLUMNS, row))
-    data["hidden"] = bool(data["hidden"])
     data["authors"] = data.get("authors") or []
     return DocumentRecord(**data)
 
@@ -281,7 +280,6 @@ class PostgresSink:
             "ALTER TABLE documents ADD COLUMN IF NOT EXISTS storage_object VARCHAR(1024)",
             "ALTER TABLE documents ADD COLUMN IF NOT EXISTS storage_uri VARCHAR(1400)",
             # Скрытие из ответов и эвристические признаки документа
-            "ALTER TABLE documents ADD COLUMN IF NOT EXISTS hidden BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE documents ADD COLUMN IF NOT EXISTS is_scientific BOOLEAN",
             "ALTER TABLE documents ADD COLUMN IF NOT EXISTS origin TEXT",
             # Год издания из текста документа; NULL — ещё не вычислен/не найден

@@ -16,9 +16,11 @@ import random
 import re
 import threading
 import time
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from collections.abc import Iterable
 from uuid import uuid4
 
 from app.file_storage import PREVIEW_SUFFIX, MinioFileStorage
@@ -142,6 +144,28 @@ def _row_values_with_units(header: str, row: str) -> str:
                      if _label_unit(head) and any(char.isdigit() for char in cell))
 
 
+# Скрытые документы — выбор читателя, а не состояние системы: один и тот же
+# документ может быть скрыт у одного и виден у другого. Набор приезжает с
+# запросом и живёт в его контексте, поэтому все точки фильтрации (отбор фактов,
+# поиск, обход графа, рубрика на главной) читают его одинаково и без правки
+# своих сигнатур. Фоновые задачи выполняются вне запроса и видят пустой набор —
+# для них скрытых документов нет, и это верно: они работают с базой целиком.
+_HIDDEN_DOCUMENTS: ContextVar[frozenset[str]] = ContextVar("hidden_documents", default=frozenset())
+
+
+def hidden_documents() -> frozenset[str]:
+    return _HIDDEN_DOCUMENTS.get()
+
+
+def use_hidden_documents(document_ids: Iterable[str] | None):
+    """Устанавливает набор на время запроса; возвращает токен для сброса."""
+    return _HIDDEN_DOCUMENTS.set(frozenset(document_ids or ()))
+
+
+def reset_hidden_documents(token) -> None:
+    _HIDDEN_DOCUMENTS.reset(token)
+
+
 class ApplicationStore:
     def __init__(
         self,
@@ -263,31 +287,16 @@ class ApplicationStore:
     # --- Скрытие документов: единая точка фильтрации для всех путей ответа ---
 
     def hidden_document_ids(self) -> set[str]:
-        """id скрытых документов; снапшот — воркеры мутируют documents параллельно."""
-        return {doc_id for doc_id, document in list(self.documents.items()) if document.hidden}
+        """id документов, скрытых читателем текущего запроса."""
+        return set(hidden_documents())
 
     def is_visible_fact(self, fact: Fact) -> bool:
-        document = self.documents.get(fact.source.document_id)
-        return document is None or not document.hidden
+        return fact.source.document_id not in hidden_documents()
 
     def visible_facts(self) -> list[Fact]:
         """Факты из нескрытых документов — единственный источник фактов для ответов."""
-        hidden = self.hidden_document_ids()
+        hidden = hidden_documents()
         return [fact for fact in list(self.facts.values()) if fact.source.document_id not in hidden]
-
-    def set_document_visibility(self, document_id: str, hidden: bool) -> DocumentRecord:
-        """Скрывает/показывает документ. Данные не удаляются, Neo4j не перестраивается."""
-        # Проверка и persist атомарны под общим с delete_document локом
-        # (по образцу reprocess_document): переключение видимости, выполненное
-        # во время удаления, не должно повторно вставлять строку только что
-        # удалённого документа в PG
-        with self._ingest_lock:
-            if not self._document_alive(document_id):
-                raise KeyError(document_id)
-            document = self.documents[document_id]
-            document.hidden = hidden
-            self.persist_current(document)
-        return document
 
     def random_visible_fact(self) -> Fact | None:
         """Случайный approved-факт из нескрытого документа; None, если таких нет."""
